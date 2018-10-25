@@ -11,7 +11,7 @@
                  [seesaw "1.4.4"]]
   :source-paths ["src" "../common/clojure"]
   :java-source-paths ["../common/java"]
-  :javac-options ["-target" "1.6" "-source" "1.6" "-Xlint:-options"]
+  :javac-options ["-target" "1.8" "-source" "1.8" "-Xlint:-options"]
   :resource-paths ["resources"
                    "../android/res"
                    "../android/res/drawable"]
