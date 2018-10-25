@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.io.Reader;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -68,7 +69,15 @@ public class TranslateReader extends FilterReader {
      *  @param in UTF-8
      */
     public TranslateReader(I2PAppContext ctx, String bundle, InputStream in) throws IOException {
-        super(new BufferedReader(new InputStreamReader(in, "UTF-8")));
+        this(ctx, bundle, new BufferedReader(new InputStreamReader(in, "UTF-8")));
+    }
+
+    /**
+     *  @param bundle may be null for tagging only
+     *  @since 0.9.34
+     */
+    public TranslateReader(I2PAppContext ctx, String bundle, Reader in) throws IOException {
+        super(in);
         _ctx = ctx;
         _bundle = bundle;
         _args = new ArrayList<String>(4);
@@ -351,7 +360,7 @@ public class TranslateReader extends FilterReader {
         public void tag(List<String> args) {
             if (args.size() <= 0)
                 return;
-            _out.print("\t_(");
+            _out.print("\t_t(");
             for (int i = 0; i < args.size(); i++) {
                 if (i > 0)
                     _out.print(", ");
@@ -373,6 +382,9 @@ public class TranslateReader extends FilterReader {
         }
     }
 
+    /**
+     *  Do not comment out, used to extract tags as a part of the build process.
+     */
     public static void main(String[] args) {
         try {
             if (args.length >= 2 && args[0].equals("test"))
@@ -391,14 +403,19 @@ public class TranslateReader extends FilterReader {
     }
 
     private static void test(String file) throws IOException {
-        TranslateReader r = new TranslateReader(I2PAppContext.getGlobalContext(),
-                                                "net.i2p.router.web.messages",
-                                                new FileInputStream(file));
-        int c;
-        while ((c = r.read()) >= 0) {
-            System.out.print((char)c);
+        TranslateReader r = null;
+        try {
+            r = new TranslateReader(I2PAppContext.getGlobalContext(),
+                                    "net.i2p.router.web.messages",
+                                    new FileInputStream(file));
+            int c;
+            while ((c = r.read()) >= 0) {
+                System.out.print((char)c);
+            }
+            System.out.flush();
+        } finally {
+            if (r != null) try { r.close(); } catch (IOException ioe) {}
         }
-        System.out.flush();
     }
 
     /** @param files ignore 0 */

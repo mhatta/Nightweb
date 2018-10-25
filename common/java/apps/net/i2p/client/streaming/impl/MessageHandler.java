@@ -15,13 +15,14 @@ import net.i2p.util.Log;
  * Receive raw information from the I2PSession and turn it into
  * Packets, if we can.
  *<p>
- * I2PSession -> MessageHandler -> PacketHandler -> ConnectionPacketHandler -> MessageInputStream
+ * I2PSession -&gt; MessageHandler -&gt; PacketHandler -&gt; ConnectionPacketHandler -&gt; MessageInputStream
  */
 class MessageHandler implements I2PSessionMuxedListener {
     private final ConnectionManager _manager;
     private final I2PAppContext _context;
     private final Log _log;
     private final Set<I2PSocketManager.DisconnectListener> _listeners;
+    private boolean _restartPending;
     
     public MessageHandler(I2PAppContext ctx, ConnectionManager mgr) {
         _manager = mgr;
@@ -50,24 +51,34 @@ class MessageHandler implements I2PSessionMuxedListener {
      * @param size size of the message
      */
     public void messageAvailable(I2PSession session, int msgId, long size, int proto, int fromPort, int toPort) {
-        byte data[] = null;
+        byte data[];
         try {
             data = session.receiveMessage(msgId);
         } catch (I2PSessionException ise) {
-            _context.statManager().addRateData("stream.packetReceiveFailure", 1, 0);
+            _context.statManager().addRateData("stream.packetReceiveFailure", 1);
             if (_log.shouldLog(Log.WARN))
                 _log.warn("Error receiving the message", ise);
             return;
         }
-        if (data == null) return;
-        Packet packet = new Packet();
+        if (data == null) {
+            if (_log.shouldLog(Log.WARN))
+                _log.warn("Received null data on " + session + " proto: " + proto +
+                          " fromPort: " + fromPort + " toPort: " + toPort);
+            return;
+        }
+        if (_log.shouldLog(Log.DEBUG))
+            _log.debug("Received " + data.length + " bytes on " + session +
+                       " (" + _manager + ')' +
+                       " proto: " + proto +
+                       " fromPort: " + fromPort + " toPort: " + toPort);
+        Packet packet = new Packet(session);
         try {
             packet.readPacket(data, 0, data.length);
             packet.setRemotePort(fromPort);
             packet.setLocalPort(toPort);
             _manager.getPacketHandler().receivePacket(packet);
         } catch (IllegalArgumentException iae) {
-            _context.statManager().addRateData("stream.packetReceiveFailure", 1, 0);
+            _context.statManager().addRateData("stream.packetReceiveFailure", 1);
             if (_log.shouldLog(Log.WARN))
                 _log.warn("Received an invalid packet", iae);
         }
@@ -93,6 +104,13 @@ class MessageHandler implements I2PSessionMuxedListener {
         if (_log.shouldLog(Log.WARN))
             _log.warn("I2PSession disconnected");
         _manager.disconnectAllHard();
+        // kill anybody waiting in accept()
+        if (_restartPending) {
+            _manager.getConnectionHandler().setRestartPending();
+            _restartPending = false;
+        } else {
+            _manager.getConnectionHandler().setActive(false);
+        }
         
         for (I2PSocketManager.DisconnectListener lsnr : _listeners) {
             lsnr.sessionDisconnected();
@@ -108,10 +126,9 @@ class MessageHandler implements I2PSessionMuxedListener {
      * @param error the actual error
      */
     public void errorOccurred(I2PSession session, String message, Throwable error) {
+        _restartPending = message.contains("restart");
         if (_log.shouldLog(Log.WARN))
-            _log.warn("error occurred: " + message + "- " + error.getMessage()); 
-        if (_log.shouldLog(Log.WARN))
-            _log.warn("cause", error);
+            _log.warn("error occurred: " + message, error); 
         //_manager.disconnectAllHard();
     }
     

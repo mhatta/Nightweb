@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.data.i2np.I2NPMessage;
 import net.i2p.router.util.CDPQEntry;
 import net.i2p.util.Log;
@@ -36,7 +36,7 @@ public class OutNetMessage implements CDPQEntry {
     private final int _messageTypeId;
     /** cached message ID, for use after we discard the message */
     private final long _messageId;
-    private final long _messageSize;
+    private final int _messageSize;
     private final int _priority;
     private final long _expiration;
     private Job _onSend;
@@ -69,23 +69,23 @@ public class OutNetMessage implements CDPQEntry {
     public static final int PRIORITY_EXPLORATORY = 455;
     /** may be adjusted +/- 25 for outbound traffic */
     public static final int PRIORITY_MY_DATA = 425;
-    public static final int PRIORITY_MY_NETDB_STORE_LOW = 300;
     public static final int PRIORITY_HIS_BUILD_REQUEST = 300;
     public static final int PRIORITY_BUILD_REPLY = 300;
     public static final int PRIORITY_NETDB_REPLY = 300;
     public static final int PRIORITY_HIS_NETDB_STORE = 200;
     public static final int PRIORITY_NETDB_FLOOD = 200;
     public static final int PRIORITY_PARTICIPATING = 200;
+    public static final int PRIORITY_MY_NETDB_STORE_LOW = 150;
     public static final int PRIORITY_NETDB_EXPLORE = 100;
     public static final int PRIORITY_NETDB_HARVEST = 100;
     public static final int PRIORITY_LOWEST = 100;
 
     /**
-     *  Null msg and target (used in OutboundMessageRegistry only)
+     *  Null msg and target, zero expiration (used in OutboundMessageRegistry only)
      *  @since 0.9.9
      */
-    public OutNetMessage(RouterContext context, long expiration) {
-        this(context, null, expiration, -1, null);
+    public OutNetMessage(RouterContext context) {
+        this(context, null, 0, -1, null);
     }
 
     /**
@@ -146,6 +146,7 @@ public class OutNetMessage implements CDPQEntry {
     }
 
     /** @deprecated unused */
+    @Deprecated
     public Map<String, Long> getTimestamps() {
         if (_log.shouldLog(Log.INFO)) {
             synchronized (this) {
@@ -157,6 +158,7 @@ public class OutNetMessage implements CDPQEntry {
     }
 
     /** @deprecated unused */
+    @Deprecated
     public Long getTimestamp(String eventName) {
         if (_log.shouldLog(Log.INFO)) {
             synchronized (this) {
@@ -178,17 +180,18 @@ public class OutNetMessage implements CDPQEntry {
      * @deprecated
      * @return null always
      */
+    @Deprecated
     public Exception getCreatedBy() { return null; }
     
     /**
      * Specifies the router to which the message should be delivered.
-     *
+     * Generally non-null but may be null in special cases.
      */
     public RouterInfo getTarget() { return _target; }
 
     /**
-     * Specifies the message to be sent
-     *
+     * Specifies the message to be sent.
+     * Generally non-null but may be null in special cases.
      */
     public I2NPMessage getMessage() { return _message; }
 
@@ -197,14 +200,17 @@ public class OutNetMessage implements CDPQEntry {
      *  @return the simple class name
      */
     public String getMessageType() {
-        I2NPMessage msg = _message;
-        return msg != null ? msg.getClass().getSimpleName() : "null";
+        return _message != null ? _message.getClass().getSimpleName() : "null";
     }
 
     public int getMessageTypeId() { return _messageTypeId; }
     public long getMessageId() { return _messageId; }
     
-    public long getMessageSize() {
+    /**
+     * How large the message is, including the full 16 byte header.
+     * Transports with different header sizes should adjust.
+     */
+    public int getMessageSize() {
         return _messageSize;
     }
     
@@ -368,12 +374,12 @@ public class OutNetMessage implements CDPQEntry {
             buf.append(getMessageType());
             buf.append(" ID ").append(_messageId);
         }
-        buf.append(" expiring on ").append(new Date(_expiration));
+        buf.append(" expiring ").append(new Date(_expiration));
         buf.append(" priority ").append(_priority);
         if (_failedTransports != null)
-            buf.append(" failed delivery on transports ").append(_failedTransports);
+            buf.append(" failed transports: ").append(_failedTransports);
         if (_target == null)
-            buf.append(" targetting no one in particular...");
+            buf.append(" (null target)");
         else
             buf.append(" targetting ").append(_target.getIdentity().getHash().toBase64());
         if (_onReply != null)

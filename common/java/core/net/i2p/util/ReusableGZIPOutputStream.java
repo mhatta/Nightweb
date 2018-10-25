@@ -20,8 +20,10 @@ import net.i2p.data.DataHelper;
 public class ReusableGZIPOutputStream extends ResettableGZIPOutputStream {
     // Apache Harmony 5.0M13 Deflater doesn't work after reset()
     // Neither does Android
-    private static final boolean ENABLE_CACHING = !(SystemVersion.isApache() ||
-                                                    SystemVersion.isAndroid());
+    // attempt to fix #1915
+    //private static final boolean ENABLE_CACHING = !(SystemVersion.isApache() ||
+    //                                                SystemVersion.isAndroid());
+    private static final boolean ENABLE_CACHING = false;
     private static final LinkedBlockingQueue<ReusableGZIPOutputStream> _available;
     static {
         if (ENABLE_CACHING)
@@ -75,12 +77,21 @@ public class ReusableGZIPOutputStream extends ResettableGZIPOutputStream {
     /** pull the contents of the stream written */
     public byte[] getData() { return _buffer.toByteArray(); }
     
+    /**
+     *  Clear the cache.
+     *  @since 0.9.21
+     */
+    public static void clearCache() {
+        if (_available != null)
+            _available.clear();
+    }
+
 /******
     public static void main(String args[]) {
         try {
             for (int i = 0; i < 2; i++)
                 test();
-            for (int i = 500; i < 64*1024; i++) {
+            for (int i = 0; i < 64*1024; i++) {
                 if (!test(i)) break;
             }
         } catch (Exception e) { e.printStackTrace(); }
@@ -97,7 +108,7 @@ public class ReusableGZIPOutputStream extends ResettableGZIPOutputStream {
             byte compressed[] = o.getData();
             ReusableGZIPOutputStream.release(o);
             
-            GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(compressed));
+            ResettableGZIPInputStream in = new ResettableGZIPInputStream(new java.io.ByteArrayInputStream(compressed));
             byte rv[] = new byte[128];
             int read = in.read(rv);
             if (!DataHelper.eq(rv, 0, b, 0, b.length))
@@ -109,7 +120,7 @@ public class ReusableGZIPOutputStream extends ResettableGZIPOutputStream {
     
     private static boolean test(int size) {
         byte b[] = new byte[size];
-        new java.util.Random().nextBytes(b);
+        RandomSource.getInstance().nextBytes(b);
         try {
             ReusableGZIPOutputStream o = ReusableGZIPOutputStream.acquire();
             o.write(b);
@@ -118,8 +129,8 @@ public class ReusableGZIPOutputStream extends ResettableGZIPOutputStream {
             byte compressed[] = o.getData();
             ReusableGZIPOutputStream.release(o);
             
-            GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(compressed));
-            ByteArrayOutputStream baos2 = new ByteArrayOutputStream(256*1024);
+            ResettableGZIPInputStream in = new ResettableGZIPInputStream(new java.io.ByteArrayInputStream(compressed));
+            ByteArrayOutputStream baos2 = new ByteArrayOutputStream(size);
             byte rbuf[] = new byte[128];
             while (true) {
                 int read = in.read(rbuf);

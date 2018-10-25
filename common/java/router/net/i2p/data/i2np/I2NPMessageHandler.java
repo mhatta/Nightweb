@@ -9,7 +9,6 @@ package net.i2p.data.i2np;
  */
 
 import java.io.IOException;
-import java.io.InputStream;
 
 import net.i2p.I2PAppContext;
 import net.i2p.data.DataFormatException;
@@ -33,42 +32,6 @@ public class I2NPMessageHandler {
         _context = context;
         _log = context.logManager().getLog(I2NPMessageHandler.class);
         _lastSize = -1;
-    }
-    
-    /**
-     * Read an I2NPMessage from the stream and return the fully populated object.
-     *
-     * This is only called by I2NPMessageReader which is unused.
-     * All transports provide encapsulation and so we have byte arrays available.
-     *
-     * @deprecated use the byte array method to avoid an extra copy if you have it
-     *
-     * @throws I2NPMessageException if there is a problem handling the particular
-     *          message - if it is an unknown type or has improper formatting, etc.
-     */
-    public I2NPMessage readMessage(InputStream in) throws IOException, I2NPMessageException {
-        if (_messageBuffer == null) _messageBuffer = new byte[38*1024]; // more than necessary
-        try {
-            int type = (int)DataHelper.readLong(in, 1);
-            _lastReadBegin = System.currentTimeMillis();
-            I2NPMessage msg = I2NPMessageImpl.createMessage(_context, type);
-            // can't be null
-            //if (msg == null)
-            //    throw new I2NPMessageException("The type "+ type + " is an unknown I2NP message");
-            try {
-                _lastSize = msg.readBytes(in, type, _messageBuffer);
-            } catch (I2NPMessageException ime) {
-                throw ime;
-            } catch (Exception e) {
-                if (_log.shouldLog(Log.WARN))
-                    _log.warn("Error reading the stream", e);
-                throw new I2NPMessageException("Unknown error reading the " + msg.getClass().getSimpleName(), e); 
-            }
-            _lastReadEnd = System.currentTimeMillis();
-            return msg;
-        } catch (DataFormatException dfe) {
-            throw new I2NPMessageException("Error reading the message", dfe);
-        }
     }
     
     /** clear the last message read from a byte array with an offset */
@@ -109,29 +72,16 @@ public class I2NPMessageHandler {
     public int readMessage(byte data[], int offset, int maxLen) throws I2NPMessageException {
         int cur = offset;
         // we will assume that maxLen is >= 1 here. It's checked to be >= 16 in readBytes()
-        int type = (int)DataHelper.fromLong(data, cur, 1);
+        int type = data[cur] & 0xff;
         cur++;
         _lastReadBegin = System.currentTimeMillis();
         I2NPMessage msg = I2NPMessageImpl.createMessage(_context, type);
-        // can't be null
-        //if (msg == null) {
-        //    int sz = data.length-offset;
-        //   boolean allZero = false;
-        //    for (int i = offset; i < data.length; i++) {
-        //        if (data[i] != 0) {
-        //            allZero = false;
-        //            break;
-        //        }
-        //    }
-        //    throw new I2NPMessageException("The type "+ type + " is an unknown I2NP message (remaining sz=" 
-        //                                   + sz + " all zeros? " + allZero + ")");
-        //}
         try {
             _lastSize = msg.readBytes(data, type, cur, maxLen - 1);
             cur += _lastSize;
         } catch (I2NPMessageException ime) {
             throw ime;
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             if (_log.shouldLog(Log.WARN))
                 _log.warn("Error reading the stream", e);
             throw new I2NPMessageException("Unknown error reading the " + msg.getClass().getSimpleName(), e); 
@@ -144,14 +94,4 @@ public class I2NPMessageHandler {
     public long getLastReadTime() { return _lastReadEnd - _lastReadBegin; }
     public int getLastSize() { return _lastSize; }
     
-/****
-    public static void main(String args[]) {
-        try {
-            I2NPMessage msg = new I2NPMessageHandler(I2PAppContext.getGlobalContext()).readMessage(new FileInputStream(args[0]));
-            System.out.println(msg);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-****/
 }

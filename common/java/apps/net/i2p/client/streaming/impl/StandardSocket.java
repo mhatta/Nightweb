@@ -10,6 +10,7 @@ import java.net.SocketException;
 import java.nio.channels.SocketChannel;
 
 import net.i2p.client.streaming.I2PSocket;
+import net.i2p.client.streaming.I2PSocketAddress;
 import net.i2p.client.streaming.I2PSocketOptions;
 
 /**
@@ -20,7 +21,7 @@ import net.i2p.client.streaming.I2PSocketOptions;
  * null for some methods.
  *
  * StandardSockets are always bound, and always start out connected
- * (unless connectDelay is > 0).
+ * (unless connectDelay is &gt; 0).
  * You may not create an unbound StandardSocket.
  * Create this through the SocketManager.
  *
@@ -68,7 +69,7 @@ class StandardSocket extends Socket {
     }
 
     /**
-     *  @return null always, see MessageChannel for more info
+     *  @return null always, unimplemented
      */
     @Override
     public SocketChannel getChannel() {
@@ -117,11 +118,12 @@ class StandardSocket extends Socket {
     }
 
     /**
-     *  @return null always
+     *  @return an I2PSocketAddress as of 0.9.26; prior to that, returned null
+     *  @since implemented in 0.9.26
      */
     @Override
     public SocketAddress getLocalSocketAddress() {
-        return null;
+        return new I2PSocketAddress(_socket.getThisDestination(), _socket.getLocalPort());
     }
 
     /**
@@ -157,11 +159,12 @@ class StandardSocket extends Socket {
     }
 
     /**
-     *  @throws UnsupportedOperationException always
+     *  @return an I2PSocketAddress as of 0.9.26; prior to that, threw UnsupportedOperationException
+     *  @since implemented in 0.9.26
      */
     @Override
     public SocketAddress getRemoteSocketAddress() {
-        throw new UnsupportedOperationException();
+        return new I2PSocketAddress(_socket.getPeerDestination(), _socket.getPort());
     }
 
     /**
@@ -193,7 +196,15 @@ class StandardSocket extends Socket {
         I2PSocketOptions opts = _socket.getOptions();
         if (opts == null)
             return 0;
-        return (int) opts.getReadTimeout();
+        long rv = opts.getReadTimeout();
+        // Java Socket: 0 is forever, and we don't exactly have nonblocking
+        if (rv > Integer.MAX_VALUE)
+            rv = Integer.MAX_VALUE;
+        else if (rv < 0)
+            rv = 0;
+        else if (rv == 0)
+            rv = 1;
+        return (int) rv;
     }
 
     /**
@@ -309,6 +320,9 @@ class StandardSocket extends Socket {
         I2PSocketOptions opts = _socket.getOptions();
         if (opts == null)
             throw new SocketException("No options");
+        // Java Socket: 0 is forever
+        if (timeout == 0)
+            timeout = -1;
         opts.setReadTimeout(timeout);
     }
 

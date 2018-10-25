@@ -18,7 +18,7 @@ public interface I2PSocketOptions {
      * How long we will wait for the ACK from a SYN, in milliseconds.
      *
      * Default 60 seconds. Max of 2 minutes enforced in Connection.java,
-     * and it also interprets <= 0 as default.
+     * and it also interprets &lt;= 0 as default.
      *
      * @return milliseconds to wait, or -1 if we will wait indefinitely
      */
@@ -28,7 +28,7 @@ public interface I2PSocketOptions {
      * Define how long we will wait for the ACK from a SYN, in milliseconds.
      *
      * Default 60 seconds. Max of 2 minutes enforced in Connection.java,
-     * and it also interprets <= 0 as default.
+     * and it also interprets &lt;= 0 as default.
      *
      * @param ms timeout in ms
      */
@@ -37,22 +37,24 @@ public interface I2PSocketOptions {
     /**
      * What is the longest we'll block on the input stream while waiting
      * for more data.  If this value is exceeded, the read() throws 
-     * InterruptedIOException
+     * SocketTimeoutException as of 0.9.36.
+     * Prior to that, the read() returned -1 or 0.
      *
      * WARNING: Default -1 (unlimited), which is probably not what you want.
      *
-     * @return timeout in ms
+     * @return timeout in ms, 0 for nonblocking, -1 for forever
      */
     public long getReadTimeout();
 
     /**
      * What is the longest we'll block on the input stream while waiting
      * for more data.  If this value is exceeded, the read() throws 
-     * InterruptedIOException
+     * SocketTimeoutException as of 0.9.36.
+     * Prior to that, the read() returned -1 or 0.
      *
      * WARNING: Default -1 (unlimited), which is probably not what you want.
      *
-     * @param ms timeout in ms
+     * @param ms timeout in ms, 0 for nonblocking, -1 for forever
      */
     public void setReadTimeout(long ms);
     

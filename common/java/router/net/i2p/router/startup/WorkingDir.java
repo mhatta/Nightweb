@@ -41,8 +41,6 @@ import net.i2p.util.SystemVersion;
  * After migration, the router will run using the new directory.
  * The wrapper, however, must be stopped and restarted from the new script - until then,
  * it will continue to write to wrapper.log* in the old directory.
- *
- * @param whether to copy all data over from an existing install
  */
 public class WorkingDir {
 
@@ -53,7 +51,6 @@ public class WorkingDir {
     private final static String WORKING_DIR_DEFAULT = ".i2p";
     private final static String WORKING_DIR_DEFAULT_DAEMON = "i2p-config";
     /** we do a couple of things differently if this is the username */
-    private final static String DAEMON_USER = "i2psvc";
     private static final String PROP_WRAPPER_LOG = "wrapper.logfile";
     private static final String DEFAULT_WRAPPER_LOG = "wrapper.log";
     /** Feb 16 2006 */
@@ -63,7 +60,10 @@ public class WorkingDir {
      * Only call this once on router invocation.
      * Caller should store the return value for future reference.
      *
-     * This also redirects stdout and stderr to a wrapper.log file if there is no wrapper present.
+     * This also redirects stdout and stderr to a wrapper.log file if there is no wrapper present,
+     * unless system property I2P_DISABLE_OUTPUT_OVERRIDE is set.
+     *
+     * @param migrateOldConfig whether to copy all data over from an existing install
      */
     public static String getWorkingDir(Properties envProps, boolean migrateOldConfig) {
         String dir = null;
@@ -74,6 +74,7 @@ public class WorkingDir {
 
         boolean isWindows = SystemVersion.isWindows();
         File dirf = null;
+        String gentooWarning = null;
         if (dir != null) {
             dirf = new SecureDirectory(dir);
         } else {
@@ -93,10 +94,46 @@ public class WorkingDir {
                     dirf = new SecureDirectory(home, WORKING_DIR_DEFAULT_MAC);
                 }
             } else {
-                if (DAEMON_USER.equals(System.getProperty("user.name")))
-                    dirf = new SecureDirectory(home, WORKING_DIR_DEFAULT_DAEMON);
-                else
+                if (SystemVersion.isLinuxService()) {
+                    if (SystemVersion.isGentoo() &&
+                        SystemVersion.GENTOO_USER.equals(System.getProperty("user.name"))) {
+                        // whoops, we didn't recognize Gentoo as a service until 0.9.29,
+                        // so the config dir was /var/lib/i2p/.i2p through 0.9.28
+                        // and changed to /var/lib/i2p/i2p-config in 0.9.29.
+                        // Look for both to decide which to use.
+                        // We prefer .i2p if neither exists.
+                        // We prefer the newer if both exist.
+                        File d1 = new SecureDirectory(home, WORKING_DIR_DEFAULT);
+                        File d2 = new SecureDirectory(home, WORKING_DIR_DEFAULT_DAEMON);
+                        boolean e1 = isSetup(d1);
+                        boolean e2 = isSetup(d2);
+                        if (e1 && e2) {
+                            // d1 is probably older. Switch if it isn't.
+                            if (d2.lastModified() < d1.lastModified()) {
+                                File tmp = d2;
+                                d2 = d1;
+                                d1 = tmp;
+                                // d1 now is the older one
+                            }
+                            dirf = d2;
+                            gentooWarning = "Warning - Found both an old configuration directory " + d1.getAbsolutePath() +
+                                            " and new configuration directory " + d2.getAbsolutePath() +
+                                            " created due to a bug in release 0.9.29\n. Using the new configuration" +
+                                            " directory. To use the old directory instead, stop i2p," +
+                                            " delete the new directory, and restart.";
+                        } else if (e1 && !e2) {
+                            dirf = d1;
+                        } else if (!e1 && e2) {
+                            dirf = d2;
+                        } else {
+                            dirf = d1;
+                        }
+                    } else {
+                        dirf = new SecureDirectory(home, WORKING_DIR_DEFAULT_DAEMON);
+                    }
+                } else {
                     dirf = new SecureDirectory(home, WORKING_DIR_DEFAULT);
+                }
             }
         }
 
@@ -135,6 +172,9 @@ public class WorkingDir {
             if (dirf.isDirectory()) {
                 if (isSetup(dirf)) {
                     setupSystemOut(rv);
+                    // see above for why
+                    if (gentooWarning != null)
+                        System.err.println(gentooWarning);
                     return rv; // all is good, we found the user directory
                 }
             }
@@ -147,7 +187,7 @@ public class WorkingDir {
         // Check for a router.keys file or logs dir, if either exists it's an old install,
         // and only migrate the data files if told to do so
         // (router.keys could be deleted later by a killkeys())
-        test = new File(oldDirf, "router.keys");
+        test = new File(oldDirf, CreateRouterInfoJob.KEYS_FILENAME);
         boolean oldInstall = test.exists();
         if (!oldInstall) {
             test = new File(oldDirf, "logs");
@@ -211,7 +251,7 @@ public class WorkingDir {
             String[] files = dir.list();
             if (files == null)
                 return false;
-            String migrated[] = MIGRATE_BASE.split(",");
+            String migrated[] = DataHelper.split(MIGRATE_BASE, ",");
             for (String file: files) {
                 for (int i = 0; i < migrated.length; i++) {
                     if (file.equals(migrated[i]))
@@ -223,7 +263,8 @@ public class WorkingDir {
     }
 
     /**
-     *  Redirect stdout and stderr to a wrapper.log file if there is no wrapper.
+     *  Redirect stdout and stderr to a wrapper.log file if there is no wrapper,
+     *  unless system property I2P_DISABLE_OUTPUT_OVERRIDE is set.
      *
      *  If there is no -Dwrapper.log=/path/to/wrapper.log on the java command line
      *  to specify a log file, check for existence of wrapper.log in CWD,
@@ -236,7 +277,9 @@ public class WorkingDir {
      *  @since 0.8.13
      */
     private static void setupSystemOut(String dir) {
-        if (System.getProperty("wrapper.version") != null)
+        if (SystemVersion.hasWrapper())
+            return;
+        if (System.getProperty("I2P_DISABLE_OUTPUT_OVERRIDE") != null)
             return;
         String path = System.getProperty(PROP_WRAPPER_LOG);
         File logfile;
@@ -252,7 +295,7 @@ public class WorkingDir {
         }
         System.setProperty(PROP_WRAPPER_LOG, logfile.getAbsolutePath());
         try {
-            PrintStream ps = new PrintStream(new SecureFileOutputStream(logfile, true));
+            PrintStream ps = new PrintStream(new SecureFileOutputStream(logfile, true), true, "UTF-8");
             System.setOut(ps);
             System.setErr(ps);
         } catch (IOException ioe) {
@@ -271,15 +314,18 @@ public class WorkingDir {
         // We don't currently have a default addressbook/ in the base distribution,
         // but distros might put one in
         "addressbook,eepsite," +
+        // 0.9.15 support bundled router infos
+        "netDb," +
         // base install - files
-        // We don't currently have a default router.config, logger.config, or webapps.config in the base distribution,
+        // We don't currently have a default router.config, logger.config, susimail.config, or webapps.config in the base distribution,
         // but distros might put one in
-        "blocklist.txt,hosts.txt,i2psnark.config,i2ptunnel.config,jetty-i2psnark.xml," +
-        "logger.config,router.config,systray.config,webapps.config";
+        // blocklist.txt now accessed in base dir, user can add another in config dir if desired
+        "hosts.txt,i2psnark.config,i2ptunnel.config,jetty-i2psnark.xml," +
+        "logger.config,router.config,susimail.config,systray.config,webapps.config";
 
     private static boolean migrate(String list, File olddir, File todir) {
         boolean rv = true;
-        String files[] = list.split(",");
+        String files[] = DataHelper.split(list, ",");
         for (int i = 0; i < files.length; i++) {
             File from = new File(olddir, files[i]);
             if (!copy(from, todir)) {
@@ -303,7 +349,7 @@ public class WorkingDir {
             out = new PrintWriter(new BufferedWriter(new OutputStreamWriter(new SecureFileOutputStream(newFile), "UTF-8")));
             out.println("# Modified by I2P User dir migration script");
             String s = null;
-            boolean isDaemon = DAEMON_USER.equals(System.getProperty("user.name"));
+            boolean isDaemon = SystemVersion.isLinuxService();
             while ((s = DataHelper.readLine(in)) != null) {
                 // readLine() doesn't strip \r
                 if (s.endsWith("\r"))
@@ -319,11 +365,12 @@ public class WorkingDir {
                 out.println(s);
             }
             System.err.println("Copied " + oldFile + " with modifications");
+            if (out.checkError())
+                throw new IOException("Failed write to " + newFile);
             return true;
         } catch (IOException ioe) {
             if (in != null) {
                 System.err.println("FAILED copy " + oldFile + ": " + ioe);
-                return false;
             }
             return false;
         } finally {
@@ -361,7 +408,6 @@ public class WorkingDir {
         } catch (IOException ioe) {
             if (in != null) {
                 System.err.println("FAILED copy " + oldFile + ": " + ioe);
-                return false;
             }
             return false;
         } finally {
@@ -420,17 +466,12 @@ public class WorkingDir {
         if (!src.exists()) return false;
         boolean rv = true;
 
-        byte buf[] = new byte[4096];
         FileInputStream in = null;
         FileOutputStream out = null;
         try {
             in = new FileInputStream(src);
             out = new SecureFileOutputStream(dst);
-            
-            int read = 0;
-            while ( (read = in.read(buf)) != -1)
-                out.write(buf, 0, read);
-            
+            DataHelper.copy(in, out);
             System.err.println("Copied " + src.getPath());
         } catch (IOException ioe) {
             System.err.println("FAILED copy " + src.getPath() + ": " + ioe);

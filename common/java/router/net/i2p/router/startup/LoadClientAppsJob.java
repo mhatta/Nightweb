@@ -38,14 +38,23 @@ public class LoadClientAppsJob extends JobImpl {
         }
         List<ClientAppConfig> apps = ClientAppConfig.getClientApps(getContext());
         if (apps.isEmpty()) {
-            _log.error("Warning - No client apps or router console configured - we are just a router");
+            _log.logAlways(Log.WARN, "Warning - No client apps or router console configured - we are just a router");
             System.err.println("Warning - No client apps or router console configured - we are just a router");
             return;
         }
         for(int i = 0; i < apps.size(); i++) {
-            ClientAppConfig app = (ClientAppConfig) apps.get(i);
-            if (app.disabled)
+            ClientAppConfig app = apps.get(i);
+            if (app.disabled) {
+                if ("net.i2p.router.web.RouterConsoleRunner".equals(app.className)) {
+                    String s = "Warning - Router console is disabled. To enable,\n edit the file " +
+                               ClientAppConfig.configFile(getContext()) +
+                               ",\n change the line \"clientApp." + i + ".startOnLoad=false\"" +
+                               " to \"clientApp." + i + ".startOnLoad=true\",\n and restart.";
+                    _log.logAlways(Log.WARN, s);
+                    System.err.println(s);
+                }
                 continue;
+            }
             String argVal[] = parseArgs(app.args);
             if (app.delay <= 0) {
                 // run this guy now
@@ -108,18 +117,18 @@ public class LoadClientAppsJob extends JobImpl {
     public static String[] parseArgs(String args) {
         List<String> argList = new ArrayList<String>(4);
         if (args != null) {
-            char data[] = args.toCharArray();
             StringBuilder buf = new StringBuilder(32);
             boolean isQuoted = false;
-            for (int i = 0; i < data.length; i++) {
-                switch (data[i]) {
+            for (int i = 0; i < args.length(); i++) {
+                char c = args.charAt(i);
+                switch (c) {
                     case '\'':
-                    case '\"':
+                    case '"':
                         if (isQuoted) {
                             String str = buf.toString().trim();
                             if (str.length() > 0)
                                 argList.add(str);
-                            buf = new StringBuilder(32);
+                            buf.setLength(0);
                         }
                         isQuoted = !isQuoted;
                         break;
@@ -128,16 +137,16 @@ public class LoadClientAppsJob extends JobImpl {
                         // whitespace - if we're in a quoted section, keep this as part of the quote,
                         // otherwise use it as a delim
                         if (isQuoted) {
-                            buf.append(data[i]);
+                            buf.append(c);
                         } else {
                             String str = buf.toString().trim();
                             if (str.length() > 0)
                                 argList.add(str);
-                            buf = new StringBuilder(32);
+                            buf.setLength(0);
                         }
                         break;
                     default:
-                        buf.append(data[i]);
+                        buf.append(c);
                         break;
                 }
             }
@@ -174,7 +183,7 @@ public class LoadClientAppsJob extends JobImpl {
      *
      *  @param clientName can be null
      *  @param args can be null
-     *  @throws just about anything, caller would be wise to catch Throwable
+     *  @throws Exception just about anything, caller would be wise to catch Throwable
      *  @since 0.7.13
      */
     public static void runClientInline(String className, String clientName, String args[], Log log) throws Exception {
@@ -188,7 +197,7 @@ public class LoadClientAppsJob extends JobImpl {
      *  @param clientName can be null
      *  @param args can be null
      *  @param cl can be null
-     *  @throws just about anything, caller would be wise to catch Throwable
+     *  @throws Exception just about anything, caller would be wise to catch Throwable
      *  @since 0.7.14
      */
     public static void runClientInline(String className, String clientName, String args[],
@@ -198,7 +207,7 @@ public class LoadClientAppsJob extends JobImpl {
         if (args == null)
             args = new String[0];
         Class<?> cls = Class.forName(className, true, cl);
-        Method method = cls.getMethod("main", new Class[] { String[].class });
+        Method method = cls.getMethod("main", String[].class);
         method.invoke(cls, new Object[] { args });
     }
 
@@ -278,7 +287,7 @@ public class LoadClientAppsJob extends JobImpl {
                     ClientApp app = (ClientApp) con.newInstance(conArgs);
                     mgr.addAndStart(app, _args);
                 } else {
-                    Method method = cls.getMethod("main", new Class[] { String[].class });
+                    Method method = cls.getMethod("main", String[].class);
                     method.invoke(cls, new Object[] { _args });
                 }
             } catch (Throwable t) {
@@ -306,12 +315,6 @@ public class LoadClientAppsJob extends JobImpl {
             } catch (Throwable t) {}
             return false;
         }
-
-
-
-
-
-
     }
 
     public String getName() { return "Load up any client applications"; }

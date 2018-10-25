@@ -14,7 +14,6 @@ public enum UpdateType {
     PLUGIN,
     /** unused */
     GEOIP,
-    /** unused */
     BLOCKLIST,
     /** unused */
     RESEED,
@@ -23,5 +22,9 @@ public enum UpdateType {
     /** unused */
     ADDRESSBOOK,
     /** @since 0.9.9 */
-    ROUTER_SIGNED_SU3
+    ROUTER_SIGNED_SU3,
+    /** @since 0.9.15 */
+    NEWS_SU3,
+    /** @since 0.9.17 */
+    ROUTER_DEV_SU3
 }

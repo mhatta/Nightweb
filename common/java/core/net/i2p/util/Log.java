@@ -45,14 +45,14 @@ public class Log {
     public final static String STR_CRIT = "CRIT";
 
     public static int getLevel(String level) {
-        if (level == null) return Log.CRIT;
+        if (level == null) return ERROR;
         level = level.toUpperCase(Locale.US);
         if (STR_DEBUG.startsWith(level)) return DEBUG;
         if (STR_INFO.startsWith(level)) return INFO;
         if (STR_WARN.startsWith(level)) return WARN;
         if (STR_ERROR.startsWith(level)) return ERROR;
         if (STR_CRIT.startsWith(level)) return CRIT;
-        return CRIT;
+        return ERROR;
     }
 
     public static String toLevelString(int level) {
@@ -184,22 +184,44 @@ public class Log {
     public boolean shouldLog(int priority) {
         return priority >= _minPriority;
     }
+
+    /** @since 0.9.20 */
+    public boolean shouldDebug() {
+        return shouldLog(DEBUG);
+    }
+
+    /** @since 0.9.20 */
+    public boolean shouldInfo() {
+        return shouldLog(INFO);
+    }
+
+    /** @since 0.9.20 */
+    public boolean shouldWarn() {
+        return shouldLog(WARN);
+    }
+
+    /** @since 0.9.20 */
+    public boolean shouldError() {
+        return shouldLog(ERROR);
+    }
     
     /**
-     * logs a loop when closing a resource with level INFO
+     * logs a loop when closing a resource with level DEBUG
      * This method is for debugging purposes only and 
-     * as such subject to change or removal w/o notice.
+     * is subject to change or removal w/o notice.
+     * NOT a supported API.
      * @param desc vararg description
      * @since 0.9.8
      */
     public void logCloseLoop(Object... desc) {
-        logCloseLoop(Log.INFO, desc);
+        logCloseLoop(Log.DEBUG, desc);
     }
     
     /**
      * Logs a close loop when closing a resource
      * This method is for debugging purposes only and 
-     * as such subject to change or removal w/o notice.
+     * is subject to change or removal w/o notice.
+     * NOT a supported API.
      * @param desc vararg description of the resource
      * @param level level at which to log
      * @since 0.9.8

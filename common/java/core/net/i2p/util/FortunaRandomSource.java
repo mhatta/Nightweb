@@ -11,7 +11,9 @@ package net.i2p.util;
 
 import gnu.crypto.prng.AsyncFortunaStandalone;
 
+import java.io.IOException;
 import java.security.SecureRandom;
+import java.util.Random;
 
 import net.i2p.I2PAppContext;
 import net.i2p.crypto.EntropyHarvester;
@@ -27,14 +29,21 @@ public class FortunaRandomSource extends RandomSource implements EntropyHarveste
     private double _nextGaussian;
     private boolean _haveNextGaussian;
 
+    /**
+     *  May block up to 10 seconds or forever
+     */
     public FortunaRandomSource(I2PAppContext context) {
         super(context);
         _fortuna = new AsyncFortunaStandalone(context);
         byte seed[] = new byte[1024];
+        // may block for 10 seconds
         if (initSeed(seed)) {
             _fortuna.seed(seed);
         } else {
-            SecureRandom sr = new SecureRandom();
+            // may block forever
+            //SecureRandom sr = new SecureRandom();
+            // SecureRandom already failed in initSeed(), so try Random
+            Random sr = new Random();
             sr.nextBytes(seed);
             _fortuna.seed(seed);
         }
@@ -65,7 +74,7 @@ public class FortunaRandomSource extends RandomSource implements EntropyHarveste
      * According to the java docs (http://java.sun.com/j2se/1.4.1/docs/api/java/util/Random.html#nextInt(int))
      * nextInt(n) should return a number between 0 and n (including 0 and excluding n).  However, their pseudocode,
      * as well as sun's, kaffe's, and classpath's implementation INCLUDES NEGATIVE VALUES.
-     * WTF.  Ok, so we're going to have it return between 0 and n (including 0, excluding n), since 
+     * Ok, so we're going to have it return between 0 and n (including 0, excluding n), since 
      * thats what it has been used for.
      *
      */
@@ -99,12 +108,13 @@ public class FortunaRandomSource extends RandomSource implements EntropyHarveste
 
         // get at least 4 extra bits if possible for better
         // distribution after the %
+        // No extra needed if power of two.
         int numBits;
-        if (n > 0xfffff)
+        if (n > 0x100000)
             numBits = 31;
-        else if (n > 0xfff)
+        else if (n > 0x1000)
             numBits = 24;
-        else if (n > 0xf)
+        else if (n > 0x10)
             numBits = 16;
         else
             numBits = 8;
@@ -174,6 +184,17 @@ public class FortunaRandomSource extends RandomSource implements EntropyHarveste
     public void nextBytes(byte buf[], int offset, int length) {
         synchronized(_fortuna) {
             _fortuna.nextBytes(buf, offset, length);
+        }
+    }
+
+    /**
+     * Not part of java.util.SecureRandom, but added for efficiency, since Fortuna supports it.
+     *
+     * @since 0.9.24
+     */
+    public byte nextByte() { 
+        synchronized(_fortuna) {
+            return _fortuna.nextByte();
         }
     }
 
@@ -257,8 +278,14 @@ public class FortunaRandomSource extends RandomSource implements EntropyHarveste
     /** reseed the fortuna */
     @Override
     public void feedEntropy(String source, byte[] data, int offset, int len) {
-        synchronized(_fortuna) {
-            _fortuna.addRandomBytes(data, offset, len);
+        try {
+            synchronized(_fortuna) {
+                _fortuna.addRandomBytes(data, offset, len);
+            }
+        } catch (RuntimeException e) {
+            // AIOOBE seen, root cause unknown, ticket #1576
+            Log log = _context.logManager().getLog(FortunaRandomSource.class);
+            log.warn("feedEntropy()", e);
         }
     }
     
@@ -279,6 +306,6 @@ public class FortunaRandomSource extends RandomSource implements EntropyHarveste
                 rand.nextBytes(buf);
                 System.out.write(buf);
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (IOException e) { e.printStackTrace(); }
     }
 }

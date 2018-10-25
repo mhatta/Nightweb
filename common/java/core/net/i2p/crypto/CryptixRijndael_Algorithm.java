@@ -4,10 +4,10 @@
  */
 package net.i2p.crypto;
 
-import java.io.PrintWriter;
+//import java.io.PrintWriter;
 import java.security.InvalidKeyException;
 
-import net.i2p.util.Clock;
+//import net.i2p.util.Clock;
 
 //...........................................................................
 /**
@@ -32,6 +32,7 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
     // Debugging methods and variables
     //...........................................................................
 
+/****
     private static final String _NAME = "Rijndael_Algorithm";
     private static final boolean _IN = true, _OUT = false;
 
@@ -53,6 +54,7 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
     private static void trace(String s) {
         if (_TRACE) _err.println("<=> " + _NAME + "." + s);
     }
+****/
 
     // Constants and variables
     //...........................................................................
@@ -89,11 +91,13 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
     //...........................................................................
 
     static {
+/****
         if (_RDEBUG && _debuglevel > 6) {
             System.out.println("Algorithm Name: Rijndael ver 0.1");
             System.out.println("Electronic Codebook (ECB) Mode");
             System.out.println();
         }
+****/
         int ROOT = 0x11B;
         int i, j = 0;
 
@@ -107,8 +111,9 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             if ((j & 0x100) != 0) j ^= ROOT;
             _alog[i] = j;
         }
-        for (i = 1; i < 255; i++)
+        for (i = 1; i < 255; i++) {
             _log[_alog[i]] = i;
+        }
         byte[][] A = new byte[][] { { 1, 1, 1, 1, 1, 0, 0, 0}, { 0, 1, 1, 1, 1, 1, 0, 0}, { 0, 0, 1, 1, 1, 1, 1, 0},
                                    { 0, 0, 0, 1, 1, 1, 1, 1}, { 1, 0, 0, 0, 1, 1, 1, 1}, { 1, 1, 0, 0, 0, 1, 1, 1},
                                    { 1, 1, 1, 0, 0, 0, 1, 1}, { 1, 1, 1, 1, 0, 0, 0, 1}};
@@ -122,26 +127,30 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         box[1][7] = 1;
         for (i = 2; i < 256; i++) {
             j = _alog[255 - _log[i]];
-            for (t = 0; t < 8; t++)
+            for (t = 0; t < 8; t++) {
                 box[i][t] = (byte) ((j >>> (7 - t)) & 0x01);
+            }
         }
         //
         // affine transform:  box[i] <- B + A*box[i]
         //
         byte[][] cox = new byte[256][8];
-        for (i = 0; i < 256; i++)
+        for (i = 0; i < 256; i++) {
             for (t = 0; t < 8; t++) {
                 cox[i][t] = B[t];
-                for (j = 0; j < 8; j++)
+                for (j = 0; j < 8; j++) {
                     cox[i][t] ^= A[t][j] * box[i][j];
+                }
             }
+        }
         //
         // S-boxes and inverse S-boxes
         //
         for (i = 0; i < 256; i++) {
             _S[i] = (byte) (cox[i][0] << 7);
-            for (t = 1; t < 8; t++)
+            for (t = 1; t < 8; t++) {
                 _S[i] ^= cox[i][t] << (7 - t);
+            }
             _Si[_S[i] & 0xFF] = (byte) i;
         }
         //
@@ -150,8 +159,9 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         byte[][] G = new byte[][] { { 2, 1, 1, 3}, { 3, 2, 1, 1}, { 1, 3, 2, 1}, { 1, 1, 3, 2}};
         byte[][] AA = new byte[4][8];
         for (i = 0; i < 4; i++) {
-            for (j = 0; j < 4; j++)
+            for (j = 0; j < 4; j++) {
                 AA[i][j] = G[i][j];
+            }
             AA[i][i + 4] = 1;
         }
         byte pivot, tmp;
@@ -172,18 +182,22 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
                 }
                 pivot = AA[i][i];
             }
-            for (j = 0; j < 8; j++)
+            for (j = 0; j < 8; j++) {
                 if (AA[i][j] != 0) AA[i][j] = (byte) _alog[(255 + _log[AA[i][j] & 0xFF] - _log[pivot & 0xFF]) % 255];
-            for (t = 0; t < 4; t++)
+            }
+            for (t = 0; t < 4; t++) {
                 if (i != t) {
                     for (j = i + 1; j < 8; j++)
                         AA[t][j] ^= mul(AA[i][j], AA[t][i]);
                     AA[t][i] = 0;
                 }
+            }
         }
-        for (i = 0; i < 4; i++)
-            for (j = 0; j < 4; j++)
+        for (i = 0; i < 4; i++) {
+            for (j = 0; j < 4; j++) {
                 iG[i][j] = AA[i][j + 4];
+            }
+        }
 
         int s;
         for (t = 0; t < 256; t++) {
@@ -209,8 +223,9 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         //
         _rcon[0] = 1;
         int r = 1;
-        for (t = 1; t < 30;)
+        for (t = 1; t < 30;) {
             _rcon[t++] = (byte) (r = mul(2, r));
+        }
 
 /****
         time = Clock.getInstance().now() - time;
@@ -367,7 +382,8 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
      * session key, assuming Rijndael's default block size (128-bit).
      *
      * @param k The 128/192/256-bit user-key to use.
-     * @exception  InvalidKeyException  If the key is invalid.
+     * @throws  InvalidKeyException  If the key is invalid.
+     * @return an array of two int[][] containing { Ke, Kd }
      */
     public static final Object makeKey(byte[] k) throws InvalidKeyException {
         return makeKey(k, _BLOCK_SIZE);
@@ -380,11 +396,13 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
      * @param  in         The plaintext.
      * @param  result     The resulting ciphertext.
      * @param  inOffset   Index of in from which to start considering data.
-     * @param  sessionKey The session key to use for encryption.
+     * @param  sessionKey The session key to use for encryption. This is a CryptixAESKeyCache.KeyCacheEntry.
+     *                    We use the Ke field for encryption.
+     *                    The actual parameter type is opaque, changed in 0.9.31, and is subject to change again.
      */
     public static final void blockEncrypt(byte[] in, byte[] result, int inOffset, int outOffset, Object sessionKey) {
-        if (_RDEBUG) trace(_IN, "blockEncrypt(" + in + ", " + inOffset + ", " + sessionKey + ")");
-        int[][] Ke = (int[][]) ((Object[]) sessionKey)[0]; // extract encryption round keys
+        //if (_RDEBUG) trace(_IN, "blockEncrypt(" + in + ", " + inOffset + ", " + sessionKey + ")");
+        int[][] Ke = ((CryptixAESKeyCache.KeyCacheEntry) sessionKey).Ke; // extract encryption round keys
         int ROUNDS = Ke.length - 1;
         int[] Ker = Ke[0];
 
@@ -409,9 +427,11 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             t1 = a1;
             t2 = a2;
             t3 = a3;
+/****
             if (_RDEBUG && _debuglevel > 6)
                 System.out.println("CT" + r + "=" + intToString(t0) + intToString(t1) + intToString(t2)
                                    + intToString(t3));
+****/
         }
 
         // last round is special
@@ -436,11 +456,13 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         result[outOffset++] = (byte) (_S[(t0 >>> 16) & 0xFF] ^ (tt >>> 16));
         result[outOffset++] = (byte) (_S[(t1 >>> 8) & 0xFF] ^ (tt >>> 8));
         result[outOffset++] = (byte) (_S[t2 & 0xFF] ^ tt);
+/****
         if (_RDEBUG && _debuglevel > 6) {
             System.out.println("CT=" + toString(result));
             System.out.println();
         }
         if (_RDEBUG) trace(_OUT, "blockEncrypt()");
+****/
     }
 
     /**
@@ -450,7 +472,9 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
      * @param  in         The ciphertext.
      * @param  result     The resulting ciphertext
      * @param  inOffset   Index of in from which to start considering data.
-     * @param  sessionKey The session key to use for decryption.
+     * @param  sessionKey The session key to use for decryption. This is a CryptixAESKeyCache.KeyCacheEntry.
+     *                    We use the Kd field, for decryption.
+     *                    The actual parameter type is opaque, changed in 0.9.31, and is subject to change again.
      */
     public static final void blockDecrypt(byte[] in, byte[] result, int inOffset, int outOffset, Object sessionKey) {
         if (result.length - outOffset <= 15)
@@ -458,8 +482,8 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
                                                + " result.len=" + result.length + " result.offset=" + outOffset);
         if (in.length - inOffset <= 15)
             throw new IllegalArgumentException("data too small: " + in.length + " inOffset: " + inOffset);
-        if (_RDEBUG) trace(_IN, "blockDecrypt(" + in + ", " + inOffset + ", " + sessionKey + ")");
-        int[][] Kd = (int[][]) ((Object[]) sessionKey)[1]; // extract decryption round keys
+        //if (_RDEBUG) trace(_IN, "blockDecrypt(" + in + ", " + inOffset + ", " + sessionKey + ")");
+        int[][] Kd = ((CryptixAESKeyCache.KeyCacheEntry) sessionKey).Kd; // extract decryption round keys
         int ROUNDS = Kd.length - 1;
         int[] Kdr = Kd[0];
 
@@ -484,9 +508,11 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             t1 = a1;
             t2 = a2;
             t3 = a3;
+/****
             if (_RDEBUG && _debuglevel > 6)
                 System.out.println("PT" + r + "=" + intToString(t0) + intToString(t1) + intToString(t2)
                                    + intToString(t3));
+****/
         }
 
         // last round is special
@@ -511,11 +537,13 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         result[outOffset++] = (byte) (_Si[(t2 >>> 16) & 0xFF] ^ (tt >>> 16));
         result[outOffset++] = (byte) (_Si[(t1 >>> 8) & 0xFF] ^ (tt >>> 8));
         result[outOffset++] = (byte) (_Si[t0 & 0xFF] ^ tt);
+/****
         if (_RDEBUG && _debuglevel > 6) {
             System.out.println("PT=" + toString(result));
             System.out.println();
         }
         if (_RDEBUG) trace(_OUT, "blockDecrypt()");
+****/
     }
 
     /** A basic symmetric encryption/decryption test. */
@@ -537,39 +565,51 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
      * Expand a user-supplied key material into a session key.
      *
      * @param k          The 128/192/256-bit user-key to use.
-     * @param blockSize  The block size in bytes of this Rijndael.
-     * @exception  InvalidKeyException  If the key is invalid.
+     * @param blockSize  The block size in bytes of this Rijndael, must be 16, 24, or 32.
+     * @throws  InvalidKeyException  If the key is invalid.
+     * @return a CryptixAESKeyCache.KeyCacheEntry containing { Ke, Kd }.
+     *         The actual return type is opaque, changed in 0.9.31, and is subject to change again.
      */
-    public static final/* synchronized */Object makeKey(byte[] k, int blockSize) throws InvalidKeyException {
+    public static final Object makeKey(byte[] k, int blockSize) throws InvalidKeyException {
         return makeKey(k, blockSize, null);
     }
-    public static final/* synchronized */Object makeKey(byte[] k, int blockSize, CryptixAESKeyCache.KeyCacheEntry keyData) throws InvalidKeyException {
-        if (_RDEBUG) trace(_IN, "makeKey(" + k + ", " + blockSize + ")");
+
+    /**
+     * Expand a user-supplied key material into a session key.
+     * Not for external use, not a public API.
+     *
+     * @param k          The 128/192/256-bit user-key to use.
+     * @param blockSize  The block size in bytes of this Rijndael, must be 16, 24, or 32.
+     * @param keyData a cached data structure to fill in, or null.
+     * @throws  InvalidKeyException  If the key is invalid.
+     * @return a CryptixAESKeyCache.KeyCacheEntry containing { Ke, Kd }.
+     *         If keyData is non-null, this is keyData.
+     *         If keyData is null, this is newly allocated.
+     */
+    public static final Object makeKey(byte[] k, int blockSize, CryptixAESKeyCache.KeyCacheEntry keyData) throws InvalidKeyException {
+        //if (_RDEBUG) trace(_IN, "makeKey(" + k + ", " + blockSize + ")");
         if (k == null) throw new InvalidKeyException("Empty key");
         if (!(k.length == 16 || k.length == 24 || k.length == 32))
             throw new InvalidKeyException("Incorrect key length");
         int ROUNDS = getRounds(k.length, blockSize);
         int BC = blockSize / 4;
-        int[][] Ke = null; // new int[ROUNDS + 1][BC]; // encryption round keys
-        int[][] Kd = null; // new int[ROUNDS + 1][BC]; // decryption round keys
+        int[][] Ke; // new int[ROUNDS + 1][BC]; // encryption round keys
+        int[][] Kd; // new int[ROUNDS + 1][BC]; // decryption round keys
         int ROUND_KEY_COUNT = (ROUNDS + 1) * BC;
         int KC = k.length / 4;
-        int[] tk = null; // new int[KC];
+        int[] tk = new int[KC];
         int i, j;
-        
+
         if (keyData == null) {
-            Ke = new int[ROUNDS + 1][BC];
-            Kd = new int[ROUNDS + 1][BC];
-            tk = new int[KC];
-        } else {
-            Ke = keyData.Ke;
-            Kd = keyData.Kd;
-            tk = keyData.tk;
+            keyData = new CryptixAESKeyCache.KeyCacheEntry(ROUNDS, BC);
         }
+        Ke = keyData.Ke;
+        Kd = keyData.Kd;
 
         // copy user material bytes into temporary ints
-        for (i = 0, j = 0; i < KC;)
+        for (i = 0, j = 0; i < KC;) {
             tk[i++] = (k[j++] & 0xFF) << 24 | (k[j++] & 0xFF) << 16 | (k[j++] & 0xFF) << 8 | (k[j++] & 0xFF);
+        }
         // copy values into round key arrays
         int t = 0;
         for (j = 0; (j < KC) && (t < ROUND_KEY_COUNT); j++, t++) {
@@ -583,7 +623,7 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             tk[0] ^= (_S[(tt >>> 16) & 0xFF] & 0xFF) << 24 ^ (_S[(tt >>> 8) & 0xFF] & 0xFF) << 16
                      ^ (_S[tt & 0xFF] & 0xFF) << 8 ^ (_S[(tt >>> 24) & 0xFF] & 0xFF)
                      ^ (_rcon[rconpointer++] & 0xFF) << 24;
-            if (KC != 8)
+            if (KC != 8) {
                 for (i = 1, j = 0; i < KC;) {
                     //tk[i++] ^= tk[j++];
                     // The above line replaced with the code below in order to work around
@@ -591,7 +631,7 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
                     tk[i] ^= tk[j++];
                     i++;
                 }
-            else {
+            } else {
                 for (i = 1, j = 0; i < KC / 2;) {
                     //tk[i++] ^= tk[j++];
                     // The above line replaced with the code below in order to work around
@@ -616,21 +656,14 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
                 Kd[ROUNDS - (t / BC)][t % BC] = tk[j];
             }
         }
-        for (int r = 1; r < ROUNDS; r++)
+        for (int r = 1; r < ROUNDS; r++) {
             // inverse MixColumn where needed
             for (j = 0; j < BC; j++) {
                 tt = Kd[r][j];
                 Kd[r][j] = _U1[(tt >>> 24) & 0xFF] ^ _U2[(tt >>> 16) & 0xFF] ^ _U3[(tt >>> 8) & 0xFF] ^ _U4[tt & 0xFF];
             }
-        // assemble the encryption (Ke) and decryption (Kd) round keys into
-        // one sessionKey object
-        Object[] sessionKey = null;
-        if (keyData == null)
-            sessionKey = new Object[] { Ke, Kd};
-        else
-            sessionKey = keyData.key;
-        if (_RDEBUG) trace(_OUT, "makeKey()");
-        return sessionKey;
+        }
+        return keyData;
     }
 
     /**
@@ -639,7 +672,9 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
      * @param  in         The plaintext.
      * @param  result     The resulting ciphertext.
      * @param  inOffset   Index of in from which to start considering data.
-     * @param  sessionKey The session key to use for encryption.
+     * @param  sessionKey The session key to use for encryption. This is a CryptixAESKeyCache.KeyCacheEntry.
+     *                    We use the Ke field for encryption.
+     *                    The actual parameter type is opaque, changed in 0.9.31, and is subject to change again.
      * @param  blockSize  The block size in bytes of this Rijndael.
      */
     public static final void blockEncrypt(byte[] in, byte[] result, int inOffset, int outOffset, Object sessionKey, int blockSize) {
@@ -647,9 +682,8 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             blockEncrypt(in, result, inOffset, outOffset, sessionKey);
             return;
         }
-        if (_RDEBUG) trace(_IN, "blockEncrypt(" + in + ", " + inOffset + ", " + sessionKey + ", " + blockSize + ")");
-        Object[] sKey = (Object[]) sessionKey; // extract encryption round keys
-        int[][] Ke = (int[][]) sKey[0];
+        //if (_RDEBUG) trace(_IN, "blockEncrypt(" + in + ", " + inOffset + ", " + sessionKey + ", " + blockSize + ")");
+        int[][] Ke = ((CryptixAESKeyCache.KeyCacheEntry) sessionKey).Ke; // extract encryption round keys
 
         int BC = blockSize / 4;
         int ROUNDS = Ke.length - 1;
@@ -663,17 +697,19 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         int j = outOffset;
         int tt;
 
-        for (i = 0; i < BC; i++)
+        for (i = 0; i < BC; i++) {
             // plaintext to ints + key
             t[i] = ((in[inOffset++] & 0xFF) << 24 | (in[inOffset++] & 0xFF) << 16 | (in[inOffset++] & 0xFF) << 8 | (in[inOffset++] & 0xFF))
                    ^ Ke[0][i];
+        }
         for (int r = 1; r < ROUNDS; r++) { // apply round transforms
-            for (i = 0; i < BC; i++)
+            for (i = 0; i < BC; i++) {
                 a[i] = (_T1[(t[i] >>> 24) & 0xFF] ^ _T2[(t[(i + s1) % BC] >>> 16) & 0xFF]
                         ^ _T3[(t[(i + s2) % BC] >>> 8) & 0xFF] ^ _T4[t[(i + s3) % BC] & 0xFF])
                        ^ Ke[r][i];
+            }
             System.arraycopy(a, 0, t, 0, BC);
-            if (_RDEBUG && _debuglevel > 6) System.out.println("CT" + r + "=" + toString(t));
+            //if (_RDEBUG && _debuglevel > 6) System.out.println("CT" + r + "=" + toString(t));
         }
         for (i = 0; i < BC; i++) { // last round is special
             tt = Ke[ROUNDS][i];
@@ -682,11 +718,13 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             result[j++] = (byte) (_S[(t[(i + s2) % BC] >>> 8) & 0xFF] ^ (tt >>> 8));
             result[j++] = (byte) (_S[t[(i + s3) % BC] & 0xFF] ^ tt);
         }
+/****
         if (_RDEBUG && _debuglevel > 6) {
             System.out.println("CT=" + toString(result));
             System.out.println();
         }
         if (_RDEBUG) trace(_OUT, "blockEncrypt()");
+****/
     }
 
     /**
@@ -695,7 +733,9 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
      * @param  in         The ciphertext.
      * @param  result     The resulting ciphertext.
      * @param  inOffset   Index of in from which to start considering data.
-     * @param  sessionKey The session key to use for decryption.
+     * @param  sessionKey The session key to use for decryption. This is a CryptixAESKeyCache.KeyCacheEntry.
+     *                    We use the Kd field, for decryption.
+     *                    The actual parameter type is opaque, changed in 0.9.31, and is subject to change again.
      * @param  blockSize  The block size in bytes of this Rijndael.
      */
     public static final void blockDecrypt(byte[] in, byte[] result, int inOffset, int outOffset, Object sessionKey, int blockSize) {
@@ -704,9 +744,8 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             return;
         }
 
-        if (_RDEBUG) trace(_IN, "blockDecrypt(" + in + ", " + inOffset + ", " + sessionKey + ", " + blockSize + ")");
-        Object[] sKey = (Object[]) sessionKey; // extract decryption round keys
-        int[][] Kd = (int[][]) sKey[1];
+        //if (_RDEBUG) trace(_IN, "blockDecrypt(" + in + ", " + inOffset + ", " + sessionKey + ", " + blockSize + ")");
+        int[][] Kd = ((CryptixAESKeyCache.KeyCacheEntry) sessionKey).Kd; // extract decryption round keys
 
         int BC = blockSize / 4;
         int ROUNDS = Kd.length - 1;
@@ -720,17 +759,19 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
         int j = outOffset;
         int tt;
 
-        for (i = 0; i < BC; i++)
+        for (i = 0; i < BC; i++) {
             // ciphertext to ints + key
             t[i] = ((in[inOffset++] & 0xFF) << 24 | (in[inOffset++] & 0xFF) << 16 | (in[inOffset++] & 0xFF) << 8 | (in[inOffset++] & 0xFF))
                    ^ Kd[0][i];
+        }
         for (int r = 1; r < ROUNDS; r++) { // apply round transforms
-            for (i = 0; i < BC; i++)
+            for (i = 0; i < BC; i++) {
                 a[i] = (_T5[(t[i] >>> 24) & 0xFF] ^ _T6[(t[(i + s1) % BC] >>> 16) & 0xFF]
                         ^ _T7[(t[(i + s2) % BC] >>> 8) & 0xFF] ^ _T8[t[(i + s3) % BC] & 0xFF])
                        ^ Kd[r][i];
+            }
             System.arraycopy(a, 0, t, 0, BC);
-            if (_RDEBUG && _debuglevel > 6) System.out.println("PT" + r + "=" + toString(t));
+            //if (_RDEBUG && _debuglevel > 6) System.out.println("PT" + r + "=" + toString(t));
         }
         for (i = 0; i < BC; i++) { // last round is special
             tt = Kd[ROUNDS][i];
@@ -739,11 +780,13 @@ public final class CryptixRijndael_Algorithm // implicit no-argument constructor
             result[j++] = (byte) (_Si[(t[(i + s2) % BC] >>> 8) & 0xFF] ^ (tt >>> 8));
             result[j++] = (byte) (_Si[t[(i + s3) % BC] & 0xFF] ^ tt);
         }
+/****
         if (_RDEBUG && _debuglevel > 6) {
             System.out.println("PT=" + toString(result));
             System.out.println();
         }
         if (_RDEBUG) trace(_OUT, "blockDecrypt()");
+****/
     }
 
     /** A basic symmetric encryption/decryption test for a given key size. */

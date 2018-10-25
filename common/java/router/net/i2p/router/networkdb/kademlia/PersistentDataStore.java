@@ -11,8 +11,9 @@ package net.i2p.router.networkdb.kademlia;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileFilter;
 import java.io.FileInputStream;
-import java.io.FilenameFilter;
+import java.io.Flushable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -29,10 +30,11 @@ import net.i2p.data.Base64;
 import net.i2p.data.DatabaseEntry;
 import net.i2p.data.DataFormatException;
 import net.i2p.data.Hash;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.router.JobImpl;
 import net.i2p.router.Router;
 import net.i2p.router.RouterContext;
+import net.i2p.util.FileSuffixFilter;
 import net.i2p.util.FileUtil;
 import net.i2p.util.I2PThread;
 import net.i2p.util.Log;
@@ -43,25 +45,29 @@ import net.i2p.util.SecureFileOutputStream;
  * Write out keys to disk when we get them and periodically read ones we don't know
  * about into memory, with newly read routers are also added to the routing table.
  *
+ * Public only for access to static methods by startup classes
+ *
  */
-class PersistentDataStore extends TransientDataStore {
+public class PersistentDataStore extends TransientDataStore {
     private final File _dbDir;
     private final KademliaNetworkDatabaseFacade _facade;
     private final Writer _writer;
     private final ReadJob _readJob;
     private volatile boolean _initialized;
     private final boolean _flat;
+    private final int _networkID;
     
     private final static int READ_DELAY = 2*60*1000;
     private static final String PROP_FLAT = "router.networkDatabase.flat";
-    private static final String DIR_PREFIX = "r";
-    private static final String B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
-    
+    static final String DIR_PREFIX = "r";
+    private static final String B64 = Base64.ALPHABET_I2P;
+
     /**
      *  @param dbDir relative path
      */
     public PersistentDataStore(RouterContext ctx, String dbDir, KademliaNetworkDatabaseFacade facade) throws IOException {
         super(ctx);
+        _networkID = ctx.router().getNetworkID();
         _flat = ctx.getBooleanProperty(PROP_FLAT);
         _dbDir = getDbDir(dbDir);
         _facade = facade;
@@ -162,7 +168,7 @@ class PersistentDataStore extends TransientDataStore {
     }
     
     private class RemoveJob extends JobImpl {
-        private Hash _key;
+        private final Hash _key;
         public RemoveJob(Hash key) {
             super(PersistentDataStore.this._context);
             _key = key;
@@ -193,7 +199,7 @@ class PersistentDataStore extends TransientDataStore {
      * we will soon have to implement a scheme for keeping only
      * a subset of all DatabaseEntrys in memory and keeping the rest on disk.
      */
-    private class Writer implements Runnable {
+    private class Writer implements Runnable, Flushable {
         private final Map<Hash, DatabaseEntry>_keys;
         private final Object _waitLock;
         private volatile boolean _quit;
@@ -327,15 +333,17 @@ class PersistentDataStore extends TransientDataStore {
     }
     
     /**
-     *  This is mostly for manual reseeding, i.e. the user manually
+     *  This was mostly for manual reseeding, i.e. the user manually
      *  copies RI files to the directory. Nobody does this,
      *  so this is run way too often.
+     *
+     *  But it's also for migrating and reading the files after a reseed.
      *  Reseed task calls wakeup() on completion.
      *  As of 0.9.4, also initiates an automatic reseed if necessary.
      */
     private class ReadJob extends JobImpl {
-        private long _lastModified;
-        private long _lastReseed;
+        private volatile long _lastModified;
+        private volatile long _lastReseed;
         private static final int MIN_ROUTERS = KademliaNetworkDatabaseFacade.MIN_RESEED;
         private static final long MIN_RESEED_INTERVAL = 90*60*1000;
 
@@ -346,6 +354,12 @@ class PersistentDataStore extends TransientDataStore {
         public String getName() { return "DB Read Job"; }
 
         public void runJob() {
+            if (getContext().router().gracefulShutdownInProgress()) {
+                // don't cause more disk I/O while saving,
+                // or start a reseed
+                requeue(READ_DELAY);
+                return;
+            }
             long now = getContext().clock().now();
             // check directory mod time to save a lot of object churn in scanning all the file names
             long lastMod = _dbDir.lastModified();
@@ -364,6 +378,7 @@ class PersistentDataStore extends TransientDataStore {
                 _log.info("Rereading new files");
                 // synch with the writer job
                 synchronized (_dbDir) {
+                    // _lastModified must be 0 for the first run
                     readFiles();
                 }
                 _lastModified = now;
@@ -378,7 +393,7 @@ class PersistentDataStore extends TransientDataStore {
         private void readFiles() {
             int routerCount = 0;
 
-            File routerInfoFiles[] = _dbDir.listFiles(RouterInfoFilter.getInstance());
+            File routerInfoFiles[] = _dbDir.listFiles(RI_FILTER);
             if (_flat) {
                 if (routerInfoFiles != null) {
                     routerCount = routerInfoFiles.length;
@@ -407,7 +422,7 @@ class PersistentDataStore extends TransientDataStore {
                 List<File> toRead = new ArrayList<File>(2048);
                 for (int j = 0; j < B64.length(); j++) {
                     File subdir = new File(_dbDir, DIR_PREFIX + B64.charAt(j));
-                    File[] files = subdir.listFiles(RouterInfoFilter.getInstance());
+                    File[] files = subdir.listFiles(RI_FILTER);
                     if (files == null)
                         continue;
                     long lastMod = subdir.lastModified();
@@ -429,14 +444,21 @@ class PersistentDataStore extends TransientDataStore {
             }
             
             if (!_initialized) {
-                if (_facade.reseedChecker().checkReseed(routerCount))
-                    _lastReseed = _context.clock().now();
                 _initialized = true;
+                if (_facade.reseedChecker().checkReseed(routerCount)) {
+                    _lastReseed = _context.clock().now();
+                    // checkReseed will call wakeup() when done and we will run again
+                } else {
+                    _context.router().setNetDbReady();
+                }
             } else if (_lastReseed < _context.clock().now() - MIN_RESEED_INTERVAL) {
                 int count = Math.min(routerCount, size());
                 if (count < MIN_ROUTERS) {
                     if (_facade.reseedChecker().checkReseed(count))
                         _lastReseed = _context.clock().now();
+                        // checkReseed will call wakeup() when done and we will run again
+                } else {
+                    _context.router().setNetDbReady();
                 }
             }
         }
@@ -468,7 +490,7 @@ class PersistentDataStore extends TransientDataStore {
                 // don't overwrite recent netdb RIs with reseed data
                 return fileDate > _knownDate + (60*60*1000);
             } else {
-                // wtf - prevent injection from reseeding
+                // safety measure - prevent injection from reseeding
                 _log.error("Prevented LS overwrite by RI " + _key + " from " + _routerFile);
                 return false;
             }
@@ -486,7 +508,7 @@ class PersistentDataStore extends TransientDataStore {
                     fis = new BufferedInputStream(fis);
                     RouterInfo ri = new RouterInfo();
                     ri.readBytes(fis, true);  // true = verify sig on read
-                    if (ri.getNetworkId() != Router.NETWORK_ID) {
+                    if (ri.getNetworkId() != _networkID) {
                         corrupt = true;
                         if (_log.shouldLog(Log.ERROR))
                             _log.error("The router "
@@ -496,11 +518,16 @@ class PersistentDataStore extends TransientDataStore {
                         // prevent injection from reseeding
                         // this is checked in KNDF.validate() but catch it sooner and log as error.
                         corrupt = true;
-                        _log.error(ri.getIdentity().calculateHash() + " does not match " + _key + " from " + _routerFile);
+                        if (_log.shouldLog(Log.WARN))
+                            _log.warn(ri.getIdentity().calculateHash() + " does not match " + _key + " from " + _routerFile);
                     } else if (ri.getPublished() <= _knownDate) {
                         // Don't store but don't delete
                         if (_log.shouldLog(Log.WARN))
                             _log.warn("Skipping since netdb newer than " + _routerFile);
+                    } else if (getContext().blocklist().isBlocklisted(ri)) {
+                        corrupt = true;
+                        if (_log.shouldLog(Log.WARN))
+                            _log.warn(ri.getHash() + " is blocklisted");
                     } else {
                         try {
                             // persist = false so we don't write what we just read
@@ -522,6 +549,11 @@ class PersistentDataStore extends TransientDataStore {
                 } catch (IOException ioe) {
                     if (_log.shouldLog(Log.INFO))
                         _log.info("Unable to read the router reference in " + _routerFile.getName(), ioe);
+                    corrupt = true;
+                } catch (RuntimeException e) {
+                    // key certificate problems, etc., don't let one bad RI kill the whole thing
+                    if (_log.shouldLog(Log.INFO))
+                        _log.info("Unable to read the router reference in " + _routerFile.getName(), e);
                     corrupt = true;
                 } finally {
                     if (fis != null) try { fis.close(); } catch (IOException ioe) {}
@@ -552,7 +584,7 @@ class PersistentDataStore extends TransientDataStore {
                 if (!subdir.exists())
                     subdir.mkdir();
             }
-            File routerInfoFiles[] = f.listFiles(RouterInfoFilter.getInstance());
+            File routerInfoFiles[] = f.listFiles(RI_FILTER);
             if (routerInfoFiles != null)
                 migrate(f, routerInfoFiles);
         }
@@ -566,7 +598,7 @@ class PersistentDataStore extends TransientDataStore {
     private static void unmigrate(File dbdir) {
         for (int j = 0; j < B64.length(); j++) {
             File subdir = new File(dbdir, DIR_PREFIX + B64.charAt(j));
-            File[] files = subdir.listFiles(RouterInfoFilter.getInstance());
+            File[] files = subdir.listFiles(RI_FILTER);
             if (files == null)
                 continue;
             for (int i = 0; i < files.length; i++) {
@@ -596,6 +628,9 @@ class PersistentDataStore extends TransientDataStore {
     private final static String LEASESET_SUFFIX = ".dat";
     private final static String ROUTERINFO_PREFIX = "routerInfo-";
     private final static String ROUTERINFO_SUFFIX = ".dat";
+
+    /** @since 0.9.34 */
+    public static final FileFilter RI_FILTER = new FileSuffixFilter(ROUTERINFO_PREFIX, ROUTERINFO_SUFFIX);
     
     private static String getLeaseSetName(Hash hash) {
         return LEASESET_PREFIX + hash.toBase64() + LEASESET_SUFFIX;
@@ -607,8 +642,26 @@ class PersistentDataStore extends TransientDataStore {
             return ROUTERINFO_PREFIX + b64 + ROUTERINFO_SUFFIX;
         return DIR_PREFIX + b64.charAt(0) + File.separatorChar + ROUTERINFO_PREFIX + b64 + ROUTERINFO_SUFFIX;
     }
+
+    /**
+     *  The persistent RI file for a hash.
+     *  This is available before the netdb subsystem is running, so we can delete our old RI.
+     *
+     *  @return non-null, should be absolute, does not necessarily exist
+     *  @since 0.9.23
+     */
+    public static File getRouterInfoFile(RouterContext ctx, Hash hash) {
+        String b64 = hash.toBase64();
+        File dir = new File(ctx.getRouterDir(), ctx.getProperty(KademliaNetworkDatabaseFacade.PROP_DB_DIR, KademliaNetworkDatabaseFacade.DEFAULT_DB_DIR));
+        if (ctx.getBooleanProperty(PROP_FLAT))
+            return new File(dir, ROUTERINFO_PREFIX + b64 + ROUTERINFO_SUFFIX);
+        return new File(dir, DIR_PREFIX + b64.charAt(0) + File.separatorChar + ROUTERINFO_PREFIX + b64 + ROUTERINFO_SUFFIX);
+    }
     
-    private static Hash getRouterInfoHash(String filename) {
+    /**
+     *  Package private for installer BundleRouterInfos
+     */
+    static Hash getRouterInfoHash(String filename) {
         return getHash(filename, ROUTERINFO_PREFIX, ROUTERINFO_SUFFIX);
     }
     
@@ -623,7 +676,7 @@ class PersistentDataStore extends TransientDataStore {
                 return null;
             Hash h = Hash.create(b);
             return h;
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             // static
             //_log.warn("Unable to fetch the key from [" + filename + "]", e);
             return null;
@@ -642,16 +695,6 @@ class PersistentDataStore extends TransientDataStore {
                 _log.info("Removed router info at " + f.getAbsolutePath());
             }
             return;
-        }
-    }
-    
-    private final static class RouterInfoFilter implements FilenameFilter {
-        private static final FilenameFilter _instance = new RouterInfoFilter();
-        public static final FilenameFilter getInstance() { return _instance; }
-        public boolean accept(File dir, String name) {
-            if (name == null) return false;
-            name = name.toUpperCase(Locale.US);
-            return (name.startsWith(ROUTERINFO_PREFIX.toUpperCase(Locale.US)) && name.endsWith(ROUTERINFO_SUFFIX.toUpperCase(Locale.US)));
         }
     }
 }

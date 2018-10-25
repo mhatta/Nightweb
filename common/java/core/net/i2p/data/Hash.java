@@ -30,6 +30,14 @@ public class Hash extends SimpleDataStructure {
 
     /**
      * Pull from cache or return new
+     *
+     *  WARNING - If the SDS is found in the cache, the passed-in
+     *  byte array will be returned to the SimpleByteCache for reuse.
+     *  Do NOT save a reference to the passed-in data, or use or modify it,
+     *  after this call.
+     *
+     *  Ignore this warning and you WILL corrupt the cache or other data structures.
+     *
      * @throws IllegalArgumentException if data is not the correct number of bytes
      * @since 0.8.3
      */
@@ -39,7 +47,7 @@ public class Hash extends SimpleDataStructure {
 
     /**
      * Pull from cache or return new
-     * @throws AIOOBE if not enough bytes
+     * @throws ArrayIndexOutOfBoundsException if not enough bytes
      * @since 0.8.3
      */
     public static Hash create(byte[] data, int off) {
@@ -95,5 +103,23 @@ public class Hash extends SimpleDataStructure {
             _base64ed = super.toBase64();
         }
         return _base64ed;
+    }
+
+    /**
+     *  For convenience.
+     *  @return "{52 chars}.b32.i2p" or null if data not set.
+     *  @since 0.9.25
+     */
+    public String toBase32() {
+        if (_data == null)
+            return null;
+        return Base32.encode(_data) + ".b32.i2p";
+    }
+
+    /**
+     *  @since 0.9.17
+     */
+    public static void clearCache() {
+        _cache.clear();
     }
 }

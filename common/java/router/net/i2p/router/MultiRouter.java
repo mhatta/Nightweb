@@ -10,7 +10,7 @@ import java.util.Scanner;
 
 import net.i2p.I2PAppContext;
 import net.i2p.data.DataHelper;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.router.Router;
 
 /**
@@ -18,7 +18,7 @@ import net.i2p.router.Router;
  * (and all that entails).  In addition, this creates a root I2PAppContext for
  * any objects not booted through one of the RouterContexts.  Each of these 
  * contexts are configured through a simple properties file (where the name=value
- * contained in them are used for the context's getProperty(name)). <p />
+ * contained in them are used for the context's getProperty(name)). <p>
  *
  * <b>Usage:</b><pre>
  *  MultiRouter numberRouters
@@ -40,7 +40,7 @@ import net.i2p.router.Router;
  * the CPU load (but obviously making the router incapable of talking to things 
  * that need the encryption enabled).  To run a client app through a router that
  * has i2p.encryption=off, you should also add that line to the client's JVM
- * (for example, <code>java -Di2p.encryption=off -jar lib/i2ptunnel.jar</code>).<p />
+ * (for example, <code>java -Di2p.encryption=off -jar lib/i2ptunnel.jar</code>).<p>
  * 
  * To make the router console work, either run from a directory containing 
  * lib/, webapps/, docs/, etc., or point i2p.dir.base to a directory containing the
@@ -64,19 +64,21 @@ public class MultiRouter {
             usage();
             return;
         }
-        Scanner scan = new Scanner(args[0]);
-        if (!scan.hasNextInt()) {
-            usage();
-            scan.close();
-            return;
+        Scanner scan = null;
+        try {
+            scan = new Scanner(args[0]);
+            if (!scan.hasNextInt()) {
+                usage();
+                return;
+            }
+            nbrRouters = scan.nextInt();
+            if (nbrRouters < 0) {
+                usage();
+                return;
+            }
+        } finally {
+            if (scan != null) scan.close();
         }
-        nbrRouters = scan.nextInt();
-        if (nbrRouters < 0) {
-            usage();
-            scan.close();
-            return;
-        }
-        scan.close();
         
         _out = System.out;
 
@@ -193,8 +195,7 @@ public class MultiRouter {
         props.setProperty("i2np.udp.host", "127.0.0.1");
         props.setProperty("i2np.ntcp.port", BASE_PORT + id + "");
         props.setProperty("i2np.udp.port", BASE_PORT + id + "");
-        props.setProperty("i2np.ntcp.allowLocal", "true");
-        props.setProperty("i2np.udp.allowLocal", "true");
+        props.setProperty("i2np.allowLocal", "true");
         props.setProperty("i2np.udp.internalPort", BASE_PORT + id + "");
         props.setProperty("i2cp.port", Integer.toString((BASE_PORT + nbrRouters + id)));   
 
@@ -240,7 +241,7 @@ public class MultiRouter {
         while (true) {
             int alive = 0;
             for (int i = 0; i < _routers.size(); i++) {
-                Router r = (Router)_routers.get(i);
+                Router r = _routers.get(i);
                 if (!r.isAlive()) {
                 	_out.println("Router " + i + " is dead");
                 } else {

@@ -1,22 +1,36 @@
 package net.i2p.data;
 
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.security.GeneralSecurityException;
+import java.security.NoSuchAlgorithmException; 
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 
 import com.nettgryppa.security.HashCash;
+
+import gnu.getopt.Getopt;
 
 import net.i2p.I2PException;
 import net.i2p.client.I2PClient;
 import net.i2p.client.I2PClientFactory;
 import net.i2p.client.I2PSession;
 import net.i2p.client.I2PSessionException;
+import net.i2p.client.naming.HostTxtEntry;
 import net.i2p.crypto.DSAEngine;
+import net.i2p.crypto.KeyGenerator;
+import net.i2p.crypto.SigType;
+import net.i2p.util.OrderedProperties;
+import net.i2p.util.RandomSource;
+import net.i2p.util.SecureFileOutputStream;
 
 /**
  * This helper class reads and writes files in the
@@ -30,14 +44,23 @@ import net.i2p.crypto.DSAEngine;
  *     - Cert. length (2 bytes)
  *     - Certificate if length != 0
  *  - Private key (256 bytes)
- *  - Signing Private key (20 bytes)
- * Total 663 bytes
+ *  - Signing Private key (20 bytes, or length specified by key certificate)
+ * Total: 663 or more bytes
  *</pre>
  *
  * @author welterde, zzz
  */
 
 public class PrivateKeyFile {
+    
+    private static final int HASH_EFFORT = VerifiedDestination.MIN_HASHCASH_EFFORT;
+    
+    protected final File file;
+    private final I2PClient client;
+    protected Destination dest;
+    protected PrivateKey privKey;
+    protected SigningPrivateKey signingPrivKey; 
+
     /**
      *  Create a new PrivateKeyFile, or modify an existing one, with various
      *  types of Certificates.
@@ -50,64 +73,168 @@ public class PrivateKeyFile {
      *  Copied and expanded from that in Destination.java
      */
     public static void main(String args[]) {
-        if (args.length == 0) {
-            System.err.println("Usage: PrivateKeyFile filename (generates if nonexistent, then prints)");
-            System.err.println("       PrivateKeyFile -h filename (generates if nonexistent, adds hashcash cert)");
-            System.err.println("       PrivateKeyFile -h effort filename (specify HashCash effort instead of default " + HASH_EFFORT + ")");
-            System.err.println("       PrivateKeyFile -n filename (changes to null cert)");
-            System.err.println("       PrivateKeyFile -s filename signwithdestfile (generates if nonexistent, adds cert signed by 2nd dest)");
-            System.err.println("       PrivateKeyFile -u filename (changes to unknown cert)");
-            System.err.println("       PrivateKeyFile -x filename (changes to hidden cert)");
-            return;
+        int hashEffort = HASH_EFFORT;
+        String stype = null;
+        String hostname = null;
+        int mode = 0;
+        boolean error = false;
+        Getopt g = new Getopt("pkf", args, "t:nuxhse:c:a:");
+        int c;
+        while ((c = g.getopt()) != -1) {
+          switch (c) {
+            case 'c':
+                stype = g.getOptarg();
+                break;
+
+            case 't':
+                stype = g.getOptarg();
+                // fall thru...
+
+            case 'n':
+            case 'u':
+            case 'x':
+            case 'h':
+            case 's':
+                if (mode == 0)
+                    mode = c;
+                else
+                    error = true;
+                break;
+
+            case 'a':
+                hostname = g.getOptarg();
+                if (mode == 0)
+                    mode = c;
+                else
+                    error = true;
+                break;
+
+            case 'e':
+                hashEffort = Integer.parseInt(g.getOptarg());
+                break;
+
+            case '?':
+            case ':':
+            default:
+                error = true;
+                break;
+          }  // switch
+        } // while
+
+        int remaining = args.length - g.getOptind();
+        int reqd = mode == 's' ? 2 : 1;
+        if (error || remaining != reqd) {
+            usage();
+            System.exit(1);
         }
+        String filearg = args[g.getOptind()];
+
         I2PClient client = I2PClientFactory.createClient();
 
-        int filearg = 0;
-        if (args.length > 1) {
-            if (args.length >= 2 && args[0].equals("-h"))
-                filearg = args.length - 1;
-            else
-                filearg = 1;
-        }
         try {
-            File f = new File(args[filearg]);
+            File f = new File(filearg);
+            boolean exists = f.exists();
             PrivateKeyFile pkf = new PrivateKeyFile(f, client);
-            Destination d = pkf.createIfAbsent();
-            System.out.println("Original Destination:");
+            Destination d;
+            if (stype != null) {
+                SigType type = SigType.parseSigType(stype);
+                if (type == null)
+                    throw new IllegalArgumentException("Signature type " + stype + " is not supported");
+                d = pkf.createIfAbsent(type);
+            } else {
+                d = pkf.createIfAbsent();
+            }
+            if (exists)
+                System.out.println("Original Destination:");
+            else
+                System.out.println("Created Destination:");
             System.out.println(pkf);
             verifySignature(d);
-            if (args.length == 1)
-                return;
-            if (args[0].equals("-n")) {
+            switch (mode) {
+              case 0:
+                // we are done
+                break;
+
+              case 'n':
                 // Cert constructor generates a null cert
                 pkf.setCertType(Certificate.CERTIFICATE_TYPE_NULL);
                 System.out.println("New destination with null cert is:");
-            } else if (args[0].equals("-u")) {
+                break;
+
+              case 'u':
                 pkf.setCertType(99);
                 System.out.println("New destination with unknown cert is:");
-            } else if (args[0].equals("-x")) {
+                break;
+
+              case 'x':
                 pkf.setCertType(Certificate.CERTIFICATE_TYPE_HIDDEN);
                 System.out.println("New destination with hidden cert is:");
-            } else if (args[0].equals("-h")) {
-                int hashEffort = HASH_EFFORT;
-                if (args.length == 3)
-                    hashEffort = Integer.parseInt(args[1]);
+                break;
+
+              case 'h':
                 System.out.println("Estimating hashcash generation time, stand by...");
                 System.out.println(estimateHashCashTime(hashEffort));
                 pkf.setHashCashCert(hashEffort);
                 System.out.println("New destination with hashcash cert is:");
-            } else if (args.length == 3 && args[0].equals("-s")) {
+                break;
+
+              case 's':
                 // Sign dest1 with dest2's Signing Private Key
-                PrivateKeyFile pkf2 = new PrivateKeyFile(args[2]);
+                PrivateKeyFile pkf2 = new PrivateKeyFile(args[g.getOptind() + 1]);
                 pkf.setSignedCert(pkf2);
                 System.out.println("New destination with signed cert is:");
+                break;
+
+              case 't':
+                // KeyCert
+                SigType type = SigType.parseSigType(stype);
+                if (type == null)
+                    throw new IllegalArgumentException("Signature type " + stype + " is not supported");
+                pkf.setKeyCert(type);
+                System.out.println("New destination with key cert is:");
+                break;
+
+              case 'a':
+                // addressbook auth
+                OrderedProperties props = new OrderedProperties();
+                HostTxtEntry he = new HostTxtEntry(hostname, d.toBase64(), props);
+                he.sign(pkf.getSigningPrivKey());
+                System.out.println("Addressbook Authentication String:");
+                OutputStreamWriter out = new OutputStreamWriter(System.out);
+                he.write(out); 
+                out.flush();
+                System.out.println("");
+                return;
+
+              default:
+                // shouldn't happen
+                usage();
+                return;
             }
-            System.out.println(pkf);
-            pkf.write();
-            verifySignature(d);
-        } catch (Exception e) {
+            if (mode != 0) {
+                System.out.println(pkf);
+                pkf.write();
+                verifySignature(pkf.getDestination());
+            }
+        } catch (I2PException e) {
             e.printStackTrace();
+            System.exit(1);
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.exit(1);
         }
+    }
+
+    private static void usage() {
+        System.err.println("Usage: PrivateKeyFile [-c sigtype] filename (generates if nonexistent, then prints)\n" +
+                           "       PrivateKeyFile -a example.i2p filename (generate addressbook authentication string)\n" +
+                           "       PrivateKeyFile -h filename (generates if nonexistent, adds hashcash cert)\n" +
+                           "       PrivateKeyFile -h -e effort filename (specify HashCash effort instead of default " + HASH_EFFORT + ")\n" +
+                           "       PrivateKeyFile -n filename (changes to null cert)\n" +
+                           "       PrivateKeyFile -s filename signwithdestfile (generates if nonexistent, adds cert signed by 2nd dest)\n" +
+                           "       PrivateKeyFile -t sigtype filename (changes to KeyCertificate of the given sig type)\n" +
+                           "       PrivateKeyFile -u filename (changes to unknown cert)\n" +
+                           "       PrivateKeyFile -x filename (changes to hidden cert)\n");
     }
     
     public PrivateKeyFile(String file) {
@@ -121,9 +248,6 @@ public class PrivateKeyFile {
     public PrivateKeyFile(File file, I2PClient client) {
         this.file = file;
         this.client = client;
-        this.dest = null;
-        this.privKey = null;
-        this.signingPrivKey = null;
     }
     
     /** @since 0.8.9 */
@@ -131,8 +255,13 @@ public class PrivateKeyFile {
         this(file, session.getMyDestination(), session.getDecryptionKey(), session.getPrivateKey());
     }
     
-    /** @since 0.8.9 */
+    /**
+     *  @throws IllegalArgumentException on mismatch of spubkey and spk types
+     *  @since 0.8.9
+     */
     public PrivateKeyFile(File file, Destination dest, PrivateKey pk, SigningPrivateKey spk) {
+        if (dest.getSigningPublicKey().getType() != spk.getType())
+            throw new IllegalArgumentException("Signing key type mismatch");
         this.file = file;
         this.client = null;
         this.dest = dest;
@@ -140,29 +269,73 @@ public class PrivateKeyFile {
         this.signingPrivKey = spk;
     }
     
-    /** @since 0.8.9 */
+    /**
+     *  @throws IllegalArgumentException on mismatch of spubkey and spk types
+     *  @since 0.8.9
+     */
     public PrivateKeyFile(File file, PublicKey pubkey, SigningPublicKey spubkey, Certificate cert,
                           PrivateKey pk, SigningPrivateKey spk) {
+        this(file, pubkey, spubkey, cert, pk, spk, null);
+    }
+    
+    /**
+     *  @param padding null OK, must be non-null if spubkey length &lt; 128
+     *  @throws IllegalArgumentException on mismatch of spubkey and spk types
+     *  @since 0.9.16
+     */
+    public PrivateKeyFile(File file, PublicKey pubkey, SigningPublicKey spubkey, Certificate cert,
+                          PrivateKey pk, SigningPrivateKey spk, byte[] padding) {
+        if (spubkey.getType() != spk.getType())
+            throw new IllegalArgumentException("Signing key type mismatch");
         this.file = file;
         this.client = null;
         this.dest = new Destination();
         this.dest.setPublicKey(pubkey);
         this.dest.setSigningPublicKey(spubkey);
         this.dest.setCertificate(cert);
+        if (padding != null)
+            this.dest.setPadding(padding);
         this.privKey = pk;
         this.signingPrivKey = spk;
     }
     
-    /** Also reads in the file to get the privKey and signingPrivKey, 
+    /**
+     *  Can't be used for writing
+     *  @since 0.9.26
+     */
+    public PrivateKeyFile(InputStream in) throws I2PSessionException {
+        this("/dev/null");
+        I2PSession s = this.client.createSession(in, new Properties());
+        this.dest = s.getMyDestination();
+        this.privKey = s.getDecryptionKey();
+        this.signingPrivKey = s.getPrivateKey();
+    }
+    
+    /**
+     *  Create with the default signature type if nonexistent.
+     *
+     *  Also reads in the file to get the privKey and signingPrivKey, 
      *  which aren't available from I2PClient.
      */
     public Destination createIfAbsent() throws I2PException, IOException, DataFormatException {
+        return createIfAbsent(I2PClient.DEFAULT_SIGTYPE);
+    }
+    
+    /**
+     *  Create with the specified signature type if nonexistent.
+     *
+     *  Also reads in the file to get the privKey and signingPrivKey, 
+     *  which aren't available from I2PClient.
+     *
+     *  @since 0.9.26
+     */
+    public Destination createIfAbsent(SigType type) throws I2PException, IOException, DataFormatException {
         if(!this.file.exists()) {
-            FileOutputStream out = null;
+            OutputStream out = null;
             try {
-                out = new FileOutputStream(this.file);
+                out = new SecureFileOutputStream(this.file);
                 if (this.client != null)
-                    this.client.createDestination(out);
+                    this.client.createDestination(out, type);
                 else
                     write();
             } finally {
@@ -174,7 +347,10 @@ public class PrivateKeyFile {
         return getDestination();
     }
     
-    /** Also sets the local privKey and signingPrivKey */
+    /**
+     *  If the destination is not set, read it in from the file.
+     *  Also sets the local privKey and signingPrivKey.
+     */
     public Destination getDestination() throws I2PSessionException, IOException, DataFormatException {
         if (dest == null) {
             I2PSession s = open();
@@ -209,6 +385,43 @@ public class PrivateKeyFile {
         return c;
     }
     
+    /**
+     * Change cert type - caller must also call write().
+     * Side effect - creates new Destination object.
+     * @since 0.9.12
+     */
+    public Certificate setKeyCert(SigType type) {
+        if (type == SigType.DSA_SHA1)
+            return setCertType(Certificate.CERTIFICATE_TYPE_NULL);
+        if (dest == null)
+            throw new IllegalArgumentException("Dest is null");
+        KeyCertificate c = new KeyCertificate(type);
+        SimpleDataStructure signingKeys[];
+        try {
+            signingKeys = KeyGenerator.getInstance().generateSigningKeys(type);
+        } catch (GeneralSecurityException gse) {
+            throw new RuntimeException("keygen fail", gse);
+        }
+        SigningPublicKey signingPubKey = (SigningPublicKey) signingKeys[0];
+        signingPrivKey = (SigningPrivateKey) signingKeys[1];
+        // dests now immutable, must create new
+        Destination newdest = new Destination();
+        newdest.setPublicKey(dest.getPublicKey());
+        newdest.setSigningPublicKey(signingPubKey);
+        // fix up key certificate or padding
+        int len = type.getPubkeyLen();
+        if (len < 128) {
+            byte[] pad = new byte[128 - len];
+            RandomSource.getInstance().nextBytes(pad);
+            newdest.setPadding(pad);
+        } else if (len > 128) {
+            System.arraycopy(signingPubKey.getData(), 128, c.getPayload(), KeyCertificate.HEADER_LENGTH, len - 128);
+        }
+        newdest.setCertificate(c);
+        dest = newdest;
+        return c;
+    }
+    
     /** change to hashcash cert - caller must also call write() */
     public Certificate setHashCashCert(int effort) {
         Certificate c = setCertType(Certificate.CERTIFICATE_TYPE_HASHCASH);
@@ -218,7 +431,7 @@ public class PrivateKeyFile {
         HashCash hc;
         try {
             hc = HashCash.mintCash(resource, effort);
-        } catch (Exception e) {
+        } catch (NoSuchAlgorithmException e) {
             return null;
         }
         System.out.println("Generation took: " + DataHelper.formatDuration(System.currentTimeMillis() - begin));
@@ -241,7 +454,7 @@ public class PrivateKeyFile {
         hcs = hcs.substring(0, end1) + hcs.substring(start2);
         System.out.println("Short Hashcash is: " + hcs);
 
-        c.setPayload(hcs.getBytes());
+        c.setPayload(DataHelper.getUTF8(hcs));
         return c;
     }
     
@@ -251,7 +464,9 @@ public class PrivateKeyFile {
         Destination d2;
         try {
             d2 = pkf2.getDestination();
-        } catch (Exception e) {
+        } catch (I2PException e) {
+            return null;
+        } catch (IOException e) {
             return null;
         }
         if (d2 == null)
@@ -265,7 +480,10 @@ public class PrivateKeyFile {
         System.arraycopy(this.dest.getPublicKey().getData(), 0, data, 0, PublicKey.KEYSIZE_BYTES);
         System.arraycopy(this.dest.getSigningPublicKey().getData(), 0, data, PublicKey.KEYSIZE_BYTES, SigningPublicKey.KEYSIZE_BYTES);
         byte[] payload = new byte[Hash.HASH_LENGTH + Signature.SIGNATURE_BYTES];
-        byte[] sig = DSAEngine.getInstance().sign(new ByteArrayInputStream(data), spk2).getData();
+        Signature sign = DSAEngine.getInstance().sign(new ByteArrayInputStream(data), spk2);
+        if (sign == null)
+            return null;
+        byte[] sig = sign.getData();
         System.arraycopy(sig, 0, payload, 0, Signature.SIGNATURE_BYTES);
         // Add dest2's Hash for reference
         byte[] h2 = d2.calculateHash().getData();
@@ -275,10 +493,29 @@ public class PrivateKeyFile {
         return c;
     }
     
+    /**
+     *  @return null on error or if not initialized
+     */
     public PrivateKey getPrivKey() {
+        try {
+            // call this to force initialization
+            getDestination();
+        } catch (Exception e) {
+            return null;
+        }
         return this.privKey;
     }
+
+    /**
+     *  @return null on error or if not initialized
+     */
     public SigningPrivateKey getSigningPrivKey() {
+        try {
+            // call this to force initialization
+            getDestination();
+        } catch (Exception e) {
+            return null;
+        }
         return this.signingPrivKey;
     }
     
@@ -287,9 +524,9 @@ public class PrivateKeyFile {
     }
 
     public I2PSession open(Properties opts) throws I2PSessionException, IOException {
-        FileInputStream in = null;
+        InputStream in = null;
         try {
-            in = new FileInputStream(this.file);
+            in = new BufferedInputStream(new FileInputStream(this.file));
             I2PSession s = this.client.createSession(in, opts);
             return s;
         } finally {
@@ -303,17 +540,33 @@ public class PrivateKeyFile {
      *  Copied from I2PClientImpl.createDestination()
      */
     public void write() throws IOException, DataFormatException {
-        FileOutputStream out = null;
+        OutputStream out = null;
         try {
-            out = new FileOutputStream(this.file);
+            out = new SecureFileOutputStream(this.file);
             this.dest.writeBytes(out);
             this.privKey.writeBytes(out);
             this.signingPrivKey.writeBytes(out);
-            out.flush();
         } finally {
             if (out != null) {
                 try { out.close(); } catch (IOException ioe) {}
             }
+        }
+    }
+
+    /**
+     *  Verify that the PublicKey matches the PrivateKey, and
+     *  the SigningPublicKey matches the SigningPrivateKey.
+     *
+     *  @return success
+     *  @since 0.9.16
+     */
+    public boolean validateKeyPairs() {
+        try {
+            if (!dest.getPublicKey().equals(KeyGenerator.getPublicKey(privKey)))
+                return false;
+            return dest.getSigningPublicKey().equals(KeyGenerator.getSigningPublicKey(signingPrivKey));
+        } catch (IllegalArgumentException iae) {
+            return false;
         }
     }
 
@@ -323,7 +576,7 @@ public class PrivateKeyFile {
         s.append("Dest: ");
         s.append(this.dest != null ? this.dest.toBase64() : "null");
         s.append("\nB32: ");
-        s.append(this.dest != null ? Base32.encode(this.dest.calculateHash().getData()) + ".b32.i2p" : "null");
+        s.append(this.dest != null ? this.dest.toBase32() : "null");
         s.append("\nContains: ");
         s.append(this.dest);
         s.append("\nPrivate Key: ");
@@ -340,7 +593,7 @@ public class PrivateKeyFile {
         long low = Long.MAX_VALUE;
         try {
             low = HashCash.estimateTime(hashEffort);
-        } catch (Exception e) {}
+        } catch (NoSuchAlgorithmException e) {}
         // takes a lot longer than the estimate usually...
         // maybe because the resource string is much longer than used in the estimate?
         return "It is estimated that generating a HashCash Certificate with value " + hashEffort +
@@ -440,15 +693,4 @@ public class PrivateKeyFile {
     public static boolean checkSignature(Signature s, byte[] data, SigningPublicKey spk) {
         return DSAEngine.getInstance().verifySignature(s, data, spk);
     }
-    
-    
-    private static final int HASH_EFFORT = VerifiedDestination.MIN_HASHCASH_EFFORT;
-    
-    
-    
-    private final File file;
-    private final I2PClient client;
-    private Destination dest;
-    private PrivateKey privKey;
-    private SigningPrivateKey signingPrivKey; 
 }

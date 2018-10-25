@@ -7,6 +7,7 @@ package net.i2p.router.transport;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.File;
 import java.io.FileInputStream;
@@ -32,9 +33,12 @@ import net.i2p.util.Log;
  *  Generate compressed geoipv6.dat.gz file, and
  *  lookup entries in it.
  *
+ *  Public only for command line use,
+ *  not a public API, not for external use.
+ *
  *  @since IPv6
  */
-class GeoIPv6 {
+public class GeoIPv6 {
 
     private static final String GEOIP_DIR_DEFAULT = "geoip";
     private static final String GEOIP_FILE_DEFAULT = "geoipv6.dat.gz";
@@ -49,7 +53,8 @@ class GeoIPv6 {
      *
      * @param search a sorted array of IPs to search
      * @return an array of country codes, same order as the search param,
-     *         or a zero-length array on failure
+     *         or a zero-length array on total failure.
+     *         Individual array elements will be null for lookup failure of that item.
      */
     public static String[] readGeoIPFile(I2PAppContext context, Long[] search, Map<String, String> codeCache) {
         Log log = context.logManager().getLog(GeoIPv6.class);
@@ -69,7 +74,8 @@ class GeoIPv6 {
      *
      * @param search a sorted array of IPs to search
      * @return an array of country codes, same order as the search param,
-     *         or a zero-length array on failure
+     *         or a zero-length array on total failure.
+     *         Individual array elements will be null for lookup failure of that item.
      */
     private static String[] readGeoIPFile(File geoFile, Long[] search, Map<String, String> codeCache, Log log) {
         String[] rv = new String[search.length];
@@ -85,7 +91,14 @@ class GeoIPv6 {
             // skip timestamp and comments
             DataHelper.skip(in, HEADER_LEN - MAGIC.length());
             byte[] buf = new byte[18];
-            while (DataHelper.read(in, buf) == 18 && idx < search.length) {
+            while (idx < search.length) {
+                try {
+                    DataHelper.read(in, buf);
+                } catch (EOFException eofe) {
+                    // normal,
+                    // we could hit the end before finding everything
+                    break;
+                }
                 long ip1 = readLong(buf, 0);
                 long ip2 = readLong(buf, 8);
                 while (idx < search.length && search[idx].longValue() < ip1) {
@@ -170,7 +183,7 @@ class GeoIPv6 {
                         if (buf.charAt(0) == '#') {
                             continue;
                         }
-                        String[] s = buf.split(",");
+                        String[] s = DataHelper.split(buf, ",");
                         String ips1 = s[0].replace("\"", "").trim();
                         String ips2 = s[1].replace("\"", "").trim();
                         byte[] ip1 = InetAddress.getByName(ips1).getAddress();

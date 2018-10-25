@@ -19,8 +19,10 @@ import net.i2p.data.DataHelper;
  * http://www.flattermann.net/2009/01/read-a-zip-file-comment-with-java/
  * Beerware.
  *
- * since 0.8.8
+ * @deprecated scheduled for removal late 2017, not for external use
+ * @since 0.8.8
  */
+@Deprecated
 public abstract class ZipFileComment {
 
     private static final int BLOCK_LEN = 22;
@@ -37,7 +39,7 @@ public abstract class ZipFileComment {
      *  @return empty string if no comment, or the comment.
      *          The string is decoded with UTF-8
      *
-     *  @throws IOE if no valid end-of-central-directory record found
+     *  @throws IOException if no valid end-of-central-directory record found
      */
     public static String getComment(File file, int max) throws IOException {
         return getComment(file, max, 0);
@@ -53,7 +55,7 @@ public abstract class ZipFileComment {
      *  @return empty string if no comment, or the comment.
      *          The string is decoded with UTF-8
      *
-     *  @throws IOE if no valid end-of-central-directory record found
+     *  @throws IOException if no valid end-of-central-directory record found
      */
     public static String getComment(File file, int max, int skip) throws IOException {
         if (!file.exists())

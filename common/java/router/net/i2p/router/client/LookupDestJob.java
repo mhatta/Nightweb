@@ -38,9 +38,13 @@ class LookupDestJob extends JobImpl {
     }
 
     /**
-     *  One of h or name non-null
-     *  @param reqID must be >= 0 if name != null
-     *  @param sessID must non-null if reqID >= 0
+     *  One of h or name non-null.
+     *
+     *  For hash or b32 name, the dest will be returned if the LS can be found,
+     *  even if the dest uses unsupported crypto.
+     *
+     *  @param reqID must be &gt;= 0 if name != null
+     *  @param sessID must non-null if reqID &gt;= 0
      *  @param fromLocalDest use these tunnels for the lookup, or null for exploratory
      *  @since 0.9.11
      */
@@ -88,7 +92,7 @@ class LookupDestJob extends JobImpl {
                 returnFail();
         } else {
             DoneJob done = new DoneJob(getContext());
-            getContext().netDb().lookupLeaseSet(_hash, done, done, _timeout, _fromLocalDest);
+            getContext().netDb().lookupDestination(_hash, done, _timeout, _fromLocalDest);
         }
     }
 
@@ -98,9 +102,9 @@ class LookupDestJob extends JobImpl {
         }
         public String getName() { return "LeaseSet Lookup Reply to Client"; }
         public void runJob() {
-            LeaseSet ls = getContext().netDb().lookupLeaseSetLocally(_hash);
-            if (ls != null)
-                returnDest(ls.getDestination());
+            Destination dest = getContext().netDb().lookupDestinationLocally(_hash);
+            if (dest != null)
+                returnDest(dest);
             else
                 returnFail();
         }

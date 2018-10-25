@@ -52,10 +52,13 @@ import net.i2p.util.SimpleByteCache;
  * @author thecrypto, jrandom
  */
 
-public class ElGamalEngine {
+public final class ElGamalEngine {
     private final Log _log;
     private final I2PAppContext _context;
     private final YKGenerator _ykgen;
+
+    private static final BigInteger ELGPM1 = CryptoConstants.elgp.subtract(BigInteger.ONE);
+
     
     /** 
      * The ElGamal engine should only be constructed and accessed through the 
@@ -73,6 +76,7 @@ public class ElGamalEngine {
         _context = context;
         _log = context.logManager().getLog(ElGamalEngine.class);
         _ykgen = new YKGenerator(context);
+        _ykgen.start();
     }
 
     /**
@@ -116,8 +120,10 @@ public class ElGamalEngine {
         long start = _context.clock().now();
 
         byte d2[] = new byte[1+Hash.HASH_LENGTH+data.length];
-        // FIXME this isn't a random nonzero byte!
-        d2[0] = (byte)0xFF;
+        // random nonzero byte
+        do {
+            _context.random().nextBytes(d2, 0, 1);
+        } while (d2[0] == 0);
         _context.sha().calculateHash(data, 0, data.length, d2, 1);
         System.arraycopy(data, 0, d2, 1+Hash.HASH_LENGTH, data.length);
         
@@ -170,9 +176,10 @@ public class ElGamalEngine {
             if (_log.shouldLog(Log.WARN)) _log.warn("Took too long to encrypt ElGamal block (" + diff + "ms)");
         }
 
-        _context.statManager().addRateData("crypto.elGamal.encrypt", diff, 0);
+        _context.statManager().addRateData("crypto.elGamal.encrypt", diff);
         return out;
     }
+
 
     /** Decrypt the data
      * @param encrypted encrypted data, must be exactly 514 bytes
@@ -183,26 +190,26 @@ public class ElGamalEngine {
      * @return unencrypted data or null on failure
      */
     public byte[] decrypt(byte encrypted[], PrivateKey privateKey) {
-        // actually it must be exactly 514 bytes or the arraycopy below will AIOOBE
-        if ((encrypted == null) || (encrypted.length > 514))
-            throw new IllegalArgumentException("Data to decrypt must be <= 514 bytes at the moment");
+        if ((encrypted == null) || (encrypted.length != 514))
+            throw new IllegalArgumentException("Data to decrypt must be exactly 514 bytes");
         long start = _context.clock().now();
 
-        byte[] ybytes = new byte[257];
-        byte[] dbytes = new byte[257];
-        System.arraycopy(encrypted, 0, ybytes, 0, 257);
-        System.arraycopy(encrypted, 257, dbytes, 0, 257);
-        BigInteger y = new NativeBigInteger(1, ybytes);
-        BigInteger d = new NativeBigInteger(1, dbytes);
         BigInteger a = new NativeBigInteger(1, privateKey.getData());
-        BigInteger y1p = CryptoConstants.elgp.subtract(BigInteger.ONE).subtract(a);
-        BigInteger ya = y.modPow(y1p, CryptoConstants.elgp);
+        BigInteger y1p = ELGPM1.subtract(a);
+        // we use this buf first for Y, then for D, then for the hash
+        byte[] buf = SimpleByteCache.acquire(257);
+        System.arraycopy(encrypted, 0, buf, 0, 257);
+        NativeBigInteger y = new NativeBigInteger(1, buf);
+        BigInteger ya = y.modPowCT(y1p, CryptoConstants.elgp);
+        System.arraycopy(encrypted, 257, buf, 0, 257);
+        BigInteger d = new NativeBigInteger(1, buf);
         BigInteger m = ya.multiply(d);
         m = m.mod(CryptoConstants.elgp);
         byte val[] = m.toByteArray();
-        int i = 0;
-        for (i = 0; i < val.length; i++)
+        int i;
+        for (i = 0; i < val.length; i++) {
             if (val[i] != (byte) 0x00) break;
+        }
 
         int payloadLen = val.length - i - 1 - Hash.HASH_LENGTH;
         if (payloadLen < 0) {
@@ -219,10 +226,10 @@ public class ElGamalEngine {
         byte rv[] = new byte[payloadLen];
         System.arraycopy(val, i + 1 + Hash.HASH_LENGTH, rv, 0, rv.length);
 
-        byte[] calcHash = SimpleByteCache.acquire(Hash.HASH_LENGTH);
-        _context.sha().calculateHash(rv, 0, payloadLen, calcHash, 0);
-        boolean ok = DataHelper.eq(calcHash, 0, val, i + 1, Hash.HASH_LENGTH);
-        SimpleByteCache.release(calcHash);
+        // we reuse buf here for the calculated hash
+        _context.sha().calculateHash(rv, 0, payloadLen, buf, 0);
+        boolean ok = DataHelper.eq(buf, 0, val, i + 1, Hash.HASH_LENGTH);
+        SimpleByteCache.release(buf);
         
         long end = _context.clock().now();
 
@@ -232,7 +239,7 @@ public class ElGamalEngine {
                 _log.warn("Took too long to decrypt and verify ElGamal block (" + diff + "ms)");
         }
 
-        _context.statManager().addRateData("crypto.elGamal.decrypt", diff, 0);
+        _context.statManager().addRateData("crypto.elGamal.decrypt", diff);
 
         if (ok) {
             //_log.debug("Hash matches: " + DataHelper.toString(hash.getData(), hash.getData().length));
@@ -243,63 +250,4 @@ public class ElGamalEngine {
                        + Base64.encode(rv), new Exception("Doesn't match"));
         return null;
     }
-
-/****
-    public static void main(String args[]) {
-        long eTime = 0;
-        long dTime = 0;
-        long gTime = 0;
-        int numRuns = 100;
-        if (args.length > 0) try {
-            numRuns = Integer.parseInt(args[0]);
-        } catch (NumberFormatException nfe) { // nop
-        }
-
-        try {
-            Thread.sleep(30 * 1000);
-        } catch (InterruptedException ie) { // nop
-        }
-
-        RandomSource.getInstance().nextBoolean();
-        I2PAppContext context = new I2PAppContext();
-
-        System.out.println("Running " + numRuns + " times");
-
-        for (int i = 0; i < numRuns; i++) {
-            long startG = Clock.getInstance().now();
-            Object pair[] = KeyGenerator.getInstance().generatePKIKeypair();
-            long endG = Clock.getInstance().now();
-
-            PublicKey pubkey = (PublicKey) pair[0];
-            PrivateKey privkey = (PrivateKey) pair[1];
-            byte buf[] = new byte[128];
-            RandomSource.getInstance().nextBytes(buf);
-            long startE = Clock.getInstance().now();
-            byte encr[] = context.elGamalEngine().encrypt(buf, pubkey);
-            long endE = Clock.getInstance().now();
-            byte decr[] = context.elGamalEngine().decrypt(encr, privkey);
-            long endD = Clock.getInstance().now();
-            eTime += endE - startE;
-            dTime += endD - endE;
-            gTime += endG - startG;
-
-            if (!DataHelper.eq(decr, buf)) {
-                System.out.println("PublicKey     : " + DataHelper.toString(pubkey.getData(), pubkey.getData().length));
-                System.out.println("PrivateKey    : " + DataHelper.toString(privkey.getData(), privkey.getData().length));
-                System.out.println("orig          : " + DataHelper.toString(buf, buf.length));
-                System.out.println("d(e(orig)     : " + DataHelper.toString(decr, decr.length));
-                System.out.println("orig.len      : " + buf.length);
-                System.out.println("d(e(orig).len : " + decr.length);
-                System.out.println("Not equal!");
-                System.exit(0);
-            } else {
-                System.out.println("*Run " + i + " is successful, with encr.length = " + encr.length + " [E: "
-                                   + (endE - startE) + " D: " + (endD - endE) + " G: " + (endG - startG) + "]\n");
-            }
-        }
-        System.out.println("\n\nAll " + numRuns + " tests successful, average encryption time: " + (eTime / numRuns)
-                           + " average decryption time: " + (dTime / numRuns) + " average key generation time: "
-                           + (gTime / numRuns));
-    }
-****/
 }

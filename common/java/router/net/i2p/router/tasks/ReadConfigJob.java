@@ -24,11 +24,12 @@ import net.i2p.util.Log;
  * Unfortunately it will also read the file back in every time the
  * router writes it.
  *
- * So maybe this should just be disabled.
+ * We must keep this enabled, as it's the only way for people
+ * to set routerconsole.advanced=true without restarting.
  */
 public class ReadConfigJob extends JobImpl {
     private final static long DELAY = 30*1000; // reread every 30 seconds
-    private long _lastRead;
+    private volatile long _lastRead;
 
     public ReadConfigJob(RouterContext ctx) {
         super(ctx);
@@ -43,18 +44,15 @@ public class ReadConfigJob extends JobImpl {
             getContext().router().readConfig();
             _lastRead = getContext().clock().now();
             Log log = getContext().logManager().getLog(ReadConfigJob.class);
-            if (log.shouldLog(Log.WARN))
-                log.warn("Reloaded " + configFile);
+            if (log.shouldDebug())
+                log.debug("Reloaded " + configFile);
         }
-        getTiming().setStartAfter(getContext().clock().now() + DELAY);
-        getContext().jobQueue().addJob(this);
+        requeue(DELAY);
     }
     
     private boolean shouldReread(File configFile) {
-        if (!configFile.exists()) return false;
-        if (configFile.lastModified() > _lastRead) 
-            return true;
-        else
-            return false;
+        // lastModified() returns 0 if not found
+        //if (!configFile.exists()) return false;
+        return configFile.lastModified() > _lastRead;
     }
 }

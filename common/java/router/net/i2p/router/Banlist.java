@@ -60,6 +60,8 @@ public class Banlist {
         _log = context.logManager().getLog(Banlist.class);
         _entries = new ConcurrentHashMap<Hash, Entry>(16);
         _context.jobQueue().addJob(new Cleanup(_context));
+        // i2pd bug?
+        banlistRouterForever(Hash.FAKE_HASH, "Invalid Hash");
     }
     
     private class Cleanup extends JobImpl {
@@ -83,9 +85,9 @@ public class Banlist {
                 }
             } catch (IllegalStateException ise) {} // next time...
             for (Hash peer : _toUnbanlist) {
-                PeerProfile prof = _context.profileOrganizer().getProfile(peer);
-                if (prof != null)
-                    prof.unbanlist();
+                //PeerProfile prof = _context.profileOrganizer().getProfile(peer);
+                //if (prof != null)
+                //    prof.unbanlist();
                 _context.messageHistory().unbanlist(peer);
                 if (_log.shouldLog(Log.INFO))
                     _log.info("Unbanlisting router (expired) " + peer.toBase64());
@@ -135,36 +137,46 @@ public class Banlist {
     }
 
     private boolean banlistRouter(Hash peer, String reason, String reasonCode, String transport, boolean forever) {
+        long expireOn;
+        if (forever) {
+            expireOn = _context.clock().now() + BANLIST_DURATION_FOREVER;
+        } else if (transport != null) {
+            expireOn = _context.clock().now() + BANLIST_DURATION_PARTIAL;
+        } else {
+            long period = BANLIST_DURATION_MS + _context.random().nextLong(BANLIST_DURATION_MS / 4);
+            if (period > BANLIST_DURATION_MAX)
+                period = BANLIST_DURATION_MAX;
+            expireOn = _context.clock().now() + period;
+        }
+        return banlistRouter(peer, reason, reasonCode, transport, expireOn);
+    }
+
+    /**
+     *  So that we may specify an expiration
+     *
+     *  @param reason may be null
+     *  @param reasonCode may be null
+     *  @param expireOn absolute time, not a duration
+     *  @param transport may be null
+     *  @since 0.9.18
+     */
+    public boolean banlistRouter(Hash peer, String reason, String reasonCode, String transport, long expireOn) {
         if (peer == null) {
-            _log.error("wtf, why did we try to banlist null?", new Exception("banfaced"));
+            _log.error("ban null?", new Exception());
             return false;
         }
-        if (_context.routerHash().equals(peer)) {
-            _log.error("wtf, why did we try to banlist ourselves?", new Exception("banfaced"));
+        if (peer.equals(_context.routerHash())) {
+            if (_log.shouldWarn())
+                _log.warn("not banning us", new Exception());
             return false;
         }
         boolean wasAlready = false;
         if (_log.shouldLog(Log.INFO))
-            _log.info("Banlisting router " + peer.toBase64() +
+            _log.info("Banlist " + peer.toBase64() +
                ((transport != null) ? " on transport " + transport : ""), new Exception("Banlist cause: " + reason));
         
         Entry e = new Entry();
-        if (forever) {
-            e.expireOn = _context.clock().now() + BANLIST_DURATION_FOREVER;
-        } else if (transport != null) {
-            e.expireOn = _context.clock().now() + BANLIST_DURATION_PARTIAL;
-        } else {
-            long period = BANLIST_DURATION_MS + _context.random().nextLong(BANLIST_DURATION_MS / 4);
-            PeerProfile prof = _context.profileOrganizer().getProfile(peer);
-            if (prof != null) {
-                period = BANLIST_DURATION_MS << prof.incrementBanlists();
-                period += _context.random().nextLong(period);
-            }
-       
-            if (period > BANLIST_DURATION_MAX)
-                period = BANLIST_DURATION_MAX;
-            e.expireOn = _context.clock().now() + period;
-        }
+        e.expireOn = expireOn;
         e.cause = reason;
         e.causeCode = reasonCode;
         e.transports = null;
@@ -217,7 +229,7 @@ public class Banlist {
     private void unbanlistRouter(Hash peer, boolean realUnbanlist, String transport) {
         if (peer == null) return;
         if (_log.shouldLog(Log.DEBUG))
-            _log.debug("Calling unbanlistRouter " + peer.toBase64()
+            _log.debug("unbanlist " + peer.toBase64()
                       + (transport != null ? "/" + transport : ""));
         boolean fully = false;
 
@@ -234,11 +246,11 @@ public class Banlist {
         }
 
         if (fully) {
-            if (realUnbanlist) {
-                PeerProfile prof = _context.profileOrganizer().getProfile(peer);
-                if (prof != null)
-                    prof.unbanlist();
-            }
+            //if (realUnbanlist) {
+            //    PeerProfile prof = _context.profileOrganizer().getProfile(peer);
+            //    if (prof != null)
+            //        prof.unbanlist();
+            //}
             _context.messageHistory().unbanlist(peer);
             if (_log.shouldLog(Log.INFO) && e != null)
                 _log.info("Unbanlisting router " + peer.toBase64()
@@ -266,12 +278,12 @@ public class Banlist {
         }
         
         if (unbanlist) {
-            PeerProfile prof = _context.profileOrganizer().getProfile(peer);
-            if (prof != null)
-                prof.unbanlist();
+            //PeerProfile prof = _context.profileOrganizer().getProfile(peer);
+            //if (prof != null)
+            //    prof.unbanlist();
             _context.messageHistory().unbanlist(peer);
             if (_log.shouldLog(Log.INFO))
-                _log.info("Unbanlisting router (expired) " + peer.toBase64());
+                _log.info("Unbanlisting (expired) " + peer.toBase64());
         }
         
         return rv;
@@ -279,10 +291,11 @@ public class Banlist {
     
     public boolean isBanlistedForever(Hash peer) {
         Entry entry = _entries.get(peer);
-        return entry != null && entry.expireOn > _context.clock().now() + BANLIST_DURATION_MAX;
+        return entry != null && entry.expireOn > _context.clock().now() + 2*24*60*60*1000L;
     }
 
     /** @deprecated moved to router console */
+    @Deprecated
     public void renderStatusHTML(Writer out) throws IOException {
     }
 }

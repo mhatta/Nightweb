@@ -90,14 +90,14 @@ public class ClientManagerFacadeImpl extends ClientManagerFacade implements Inte
         for (Destination dest : _manager.getRunnerDestinations()) {
             ClientConnectionRunner runner = _manager.getRunner(dest);
             if ( (runner == null) || (runner.getIsDead())) continue;
-            LeaseSet ls = runner.getLeaseSet();
+            LeaseSet ls = runner.getLeaseSet(dest.calculateHash());
             if (ls == null)
                 continue; // still building
             long howLongAgo = _context.clock().now() - ls.getEarliestLeaseDate();
             if (howLongAgo > MAX_TIME_TO_REBUILD) {
                 if (_log.shouldLog(Log.ERROR))
-                    _log.error("Client " + dest.calculateHash().toBase64().substring(0,6)
-                               + " has a leaseSet that expired " + DataHelper.formatDuration(howLongAgo));
+                    _log.error("Client " + dest.toBase32()
+                               + " has a leaseSet that expired " + DataHelper.formatDuration(howLongAgo) + " ago");
                 lively = false;
             }
         }
@@ -115,6 +115,7 @@ public class ClientManagerFacadeImpl extends ClientManagerFacade implements Inte
      * @param dest Destination from which the LeaseSet's authorization should be requested
      * @param set LeaseSet with requested leases - this object must be updated to contain the 
      *            signed version (as well as any changed/added/removed Leases)
+     *            The LeaseSet contains Leases only; it is unsigned and does not have the destination set.
      * @param timeout ms to wait before failing
      * @param onCreateJob Job to run after the LeaseSet is authorized
      * @param onFailedJob Job to run after the timeout passes without receiving authorization
@@ -126,6 +127,15 @@ public class ClientManagerFacadeImpl extends ClientManagerFacade implements Inte
             _log.error("Null manager on requestLeaseSet!");
     }
     
+    /**
+     * Request that a particular client authorize the Leases contained in the 
+     * LeaseSet.
+     *
+     * @param dest Destination from which the LeaseSet's authorization should be requested
+     * @param set LeaseSet with requested leases - this object must be updated to contain the 
+     *            signed version (as well as any changed/added/removed Leases).
+     *            The LeaseSet contains Leases only; it is unsigned and does not have the destination set.
+     */
     public void requestLeaseSet(Hash dest, LeaseSet set) { 
         if (_manager != null)
             _manager.requestLeaseSet(dest, set);
@@ -179,11 +189,13 @@ public class ClientManagerFacadeImpl extends ClientManagerFacade implements Inte
     public boolean shouldPublishLeaseSet(Hash destinationHash) { return _manager.shouldPublishLeaseSet(destinationHash); }
     
     /**
+     *  @param id the router's ID for this message
+     *  @param messageNonce the client's ID for this message
      *  @param status see I2CP MessageStatusMessage for success/failure codes
      */
-    public void messageDeliveryStatusUpdate(Destination fromDest, MessageId id, int status) {
+    public void messageDeliveryStatusUpdate(Destination fromDest, MessageId id, long messageNonce, int status) {
         if (_manager != null)
-            _manager.messageDeliveryStatusUpdate(fromDest, id, status);
+            _manager.messageDeliveryStatusUpdate(fromDest, id, messageNonce, status);
         else
             _log.error("Null manager on messageDeliveryStatusUpdate!");
     }
@@ -223,6 +235,7 @@ public class ClientManagerFacadeImpl extends ClientManagerFacade implements Inte
     
     /** @deprecated unused */
     @Override
+    @Deprecated
     public void renderStatusHTML(Writer out) throws IOException { 
         if (_manager != null)
             _manager.renderStatusHTML(out); 

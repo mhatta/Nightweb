@@ -4,11 +4,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import net.i2p.data.ByteArray;
 import net.i2p.data.DataHelper;
 import net.i2p.data.Hash;
 import net.i2p.data.PublicKey;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.data.TunnelId;
 import net.i2p.data.i2np.TunnelBuildMessage;
 import net.i2p.data.i2np.VariableTunnelBuildMessage;
@@ -26,9 +25,23 @@ import net.i2p.util.VersionComparator;
  */
 abstract class BuildRequestor {
     private static final List<Integer> ORDER = new ArrayList<Integer>(TunnelBuildMessage.MAX_RECORD_COUNT);
+    //private static final String MIN_VARIABLE_VERSION = "0.7.12";
+    private static final boolean SEND_VARIABLE = true;
+    private static final int SHORT_RECORDS = 4;
+    private static final List<Integer> SHORT_ORDER = new ArrayList<Integer>(SHORT_RECORDS);
+    /** 5 (~2600 bytes) fits nicely in 3 tunnel messages */
+    private static final int MEDIUM_RECORDS = 5;
+    private static final List<Integer> MEDIUM_ORDER = new ArrayList<Integer>(MEDIUM_RECORDS);
     static {
-        for (int i = 0; i < TunnelBuildMessage.MAX_RECORD_COUNT; i++)
+        for (int i = 0; i < TunnelBuildMessage.MAX_RECORD_COUNT; i++) {
             ORDER.add(Integer.valueOf(i));
+        }
+        for (int i = 0; i < SHORT_RECORDS; i++) {
+            SHORT_ORDER.add(Integer.valueOf(i));
+        }
+        for (int i = 0; i < MEDIUM_RECORDS; i++) {
+            MEDIUM_ORDER.add(Integer.valueOf(i));
+        }
     }
 
     private static final int PRIORITY = OutNetMessage.PRIORITY_MY_BUILD_REQUEST;
@@ -82,7 +95,7 @@ abstract class BuildRequestor {
                 else if (isIB && i == len - 1)
                     id = ctx.tunnelDispatcher().getNewIBEPID();
                 else
-                    id = ctx.random().nextLong(TunnelId.MAX_ID_VALUE);
+                    id = 1 + ctx.random().nextLong(TunnelId.MAX_ID_VALUE);
                 cfg.getConfig(i).setReceiveTunnelId(DataHelper.toLong(4, id));
             }
             
@@ -90,7 +103,7 @@ abstract class BuildRequestor {
                 cfg.getConfig(i-1).setSendTunnelId(cfg.getConfig(i).getReceiveTunnelId());
             byte iv[] = new byte[16];
             ctx.random().nextBytes(iv);
-            cfg.getConfig(i).setReplyIV(new ByteArray(iv));
+            cfg.getConfig(i).setReplyIV(iv);
             cfg.getConfig(i).setReplyKey(ctx.keyGenerator().generateSessionKey());
         }
         // This is in BuildExecutor.buildTunnel() now
@@ -139,6 +152,7 @@ abstract class BuildRequestor {
                     pairedTunnel = mgr.selectOutboundTunnel();
                     if (pairedTunnel != null &&
                         pairedTunnel.getLength() <= 1 &&
+                        mgr.getOutboundSettings().getLength() > 0 &&
                         mgr.getOutboundSettings().getLength() + mgr.getOutboundSettings().getLengthVariance() > 0) {
                         // don't build using a zero-hop expl.,
                         // as it is both very bad for anonomyity,
@@ -151,6 +165,7 @@ abstract class BuildRequestor {
                     pairedTunnel = mgr.selectInboundTunnel();
                     if (pairedTunnel != null &&
                         pairedTunnel.getLength() <= 1 &&
+                        mgr.getInboundSettings().getLength() > 0 &&
                         mgr.getInboundSettings().getLength() + mgr.getInboundSettings().getLengthVariance() > 0) {
                         // ditto
                         pairedTunnel = null;
@@ -166,7 +181,10 @@ abstract class BuildRequestor {
             exec.buildComplete(cfg, pool);
             // Not even an exploratory tunnel? We are in big trouble.
             // Let's not spin through here too fast.
-            try { Thread.sleep(250); } catch (InterruptedException ie) {}
+            // But don't let a client tunnel waiting for exploratories slow things down too much,
+            // as there may be other tunnel pools who can build
+            int ms = pool.getSettings().isExploratory() ? 250 : 25;
+            try { Thread.sleep(ms); } catch (InterruptedException ie) {}
             return false;
         }
         
@@ -212,35 +230,31 @@ abstract class BuildRequestor {
             }
             OutNetMessage outMsg = new OutNetMessage(ctx, msg, ctx.clock().now() + FIRST_HOP_TIMEOUT, PRIORITY, peer);
             outMsg.setOnFailedSendJob(new TunnelBuildFirstHopFailJob(ctx, pool, cfg, exec));
-            ctx.outNetMessagePool().add(outMsg);
+            try {
+                ctx.outNetMessagePool().add(outMsg);
+            } catch (RuntimeException re) {
+                log.error("failed sending build message", re);
+                return false;
+            }
         }
         //if (log.shouldLog(Log.DEBUG))
         //    log.debug("Tunnel build message " + msg.getUniqueId() + " created in " + createTime
         //              + "ms and dispatched in " + (System.currentTimeMillis()-beforeDispatch));
         return true;
     }
-    
-    private static final String MIN_VARIABLE_VERSION = "0.7.12";
-    /** change this to true in 0.7.13 if testing goes well */
-    private static final boolean SEND_VARIABLE = true;
-    /** 5 (~2600 bytes) fits nicely in 3 tunnel messages */
-    private static final int SHORT_RECORDS = 5;
-    private static final List<Integer> SHORT_ORDER = new ArrayList<Integer>(SHORT_RECORDS);
-    static {
-        for (int i = 0; i < SHORT_RECORDS; i++)
-            SHORT_ORDER.add(Integer.valueOf(i));
-    }
 
     /** @since 0.7.12 */
+/****
+we can assume everybody supports variable now...
+keep this here for the next time we change the build protocol
     private static boolean supportsVariable(RouterContext ctx, Hash h) {
         RouterInfo ri = ctx.netDb().lookupRouterInfoLocally(h);
         if (ri == null)
             return false;
-        String v = ri.getOption("router.version");
-        if (v == null)
-            return false;
+        String v = ri.getVersion();
         return VersionComparator.comp(v, MIN_VARIABLE_VERSION) >= 0;
     }
+****/
 
     /**
      *  If the tunnel is short enough, and everybody in the tunnel, and the
@@ -248,14 +262,20 @@ abstract class BuildRequestor {
      *  then use that, otherwise the old 8-entry version.
      *  @return null on error
      */
-    private static TunnelBuildMessage createTunnelBuildMessage(RouterContext ctx, TunnelPool pool, PooledTunnelCreatorConfig cfg, TunnelInfo pairedTunnel, BuildExecutor exec) {
+    private static TunnelBuildMessage createTunnelBuildMessage(RouterContext ctx, TunnelPool pool,
+                                                               PooledTunnelCreatorConfig cfg,
+                                                               TunnelInfo pairedTunnel, BuildExecutor exec) {
         Log log = ctx.logManager().getLog(BuildRequestor.class);
         long replyTunnel = 0;
-        Hash replyRouter = null;
-        boolean useVariable = SEND_VARIABLE && cfg.getLength() <= SHORT_RECORDS;
+        Hash replyRouter;
+        boolean useVariable = SEND_VARIABLE && cfg.getLength() <= MEDIUM_RECORDS;
+
         if (cfg.isInbound()) {
             //replyTunnel = 0; // as above
             replyRouter = ctx.routerHash();
+/****
+we can assume everybody supports variable now...
+keep this here for the next time we change the build protocol
             if (useVariable) {
                 // check the reply OBEP and all the tunnel peers except ourselves
                 if (!supportsVariable(ctx, pairedTunnel.getPeer(pairedTunnel.getLength() - 1))) {
@@ -269,9 +289,13 @@ abstract class BuildRequestor {
                     }
                 }
             }
+****/
         } else {
             replyTunnel = pairedTunnel.getReceiveTunnelId(0).getTunnelId();
             replyRouter = pairedTunnel.getPeer(0);
+/****
+we can assume everybody supports variable now
+keep this here for the next time we change the build protocol
             if (useVariable) {
                 // check the reply IBGW and all the tunnel peers except ourselves
                 if (!supportsVariable(ctx, replyRouter)) {
@@ -285,16 +309,20 @@ abstract class BuildRequestor {
                     }
                 }
             }
+****/
         }
 
         // populate and encrypt the message
         TunnelBuildMessage msg;
         List<Integer> order;
         if (useVariable) {
-            msg = new VariableTunnelBuildMessage(ctx, SHORT_RECORDS);
-            order = new ArrayList<Integer>(SHORT_ORDER);
-            //if (log.shouldLog(Log.INFO))
-            //    log.info("Using new VTBM");
+            if (cfg.getLength() <= SHORT_RECORDS) {
+                msg = new VariableTunnelBuildMessage(ctx, SHORT_RECORDS);
+                order = new ArrayList<Integer>(SHORT_ORDER);
+            } else {
+                msg = new VariableTunnelBuildMessage(ctx, MEDIUM_RECORDS);
+                order = new ArrayList<Integer>(MEDIUM_ORDER);
+            }
         } else {
             msg = new TunnelBuildMessage(ctx);
             order = new ArrayList<Integer>(ORDER);

@@ -1,5 +1,6 @@
 package net.i2p.crypto;
 
+import java.io.Serializable;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -7,6 +8,8 @@ import java.util.concurrent.LinkedBlockingQueue;
  * memory churn.  The KeyCacheEntry should be held onto as long as the 
  * data referenced in it is needed (which often is only one or two lines
  * of code)
+ *
+ * Not for external use, not a public API.
  *
  * Unused as a class, as the keys are cached in the SessionKey objects,
  * but the static methods are used in FortunaStandalone.
@@ -25,6 +28,7 @@ public final class CryptixAESKeyCache {
     /*
      * @deprecated unused, keys are now cached in the SessionKey objects
      */
+    @Deprecated
     public CryptixAESKeyCache() {
         _availableKeys = new LinkedBlockingQueue<KeyCacheEntry>(MAX_KEYS);
     }
@@ -34,6 +38,7 @@ public final class CryptixAESKeyCache {
      *
      * @deprecated unused, keys are now cached in the SessionKey objects
      */
+    @Deprecated
     public final KeyCacheEntry acquireKey() {
         KeyCacheEntry rv = _availableKeys.poll();
         if (rv != null)
@@ -46,27 +51,34 @@ public final class CryptixAESKeyCache {
      *
      * @deprecated unused, keys are now cached in the SessionKey objects
      */
+    @Deprecated
     public final void releaseKey(KeyCacheEntry key) {
         _availableKeys.offer(key);
     }
     
     public static final KeyCacheEntry createNew() {
         KeyCacheEntry e = new KeyCacheEntry();
-        e.Ke = new int[ROUNDS + 1][BC]; // encryption round keys
-        e.Kd = new int[ROUNDS + 1][BC]; // decryption round keys
-        e.tk = new int[KC];
-        e.key = new Object[] { e.Ke, e.Kd };
         return e;
     }
     
     /**
      * all the data alloc'ed in a makeKey call
      */
-    public static final class KeyCacheEntry {
-        int[][] Ke;
-        int[][] Kd;
-        int[]   tk;
-        
-        Object[] key;
+    public static class KeyCacheEntry implements Serializable {
+        /** encryption round keys */
+        final int[][] Ke;
+        /** decryption round keys */
+        final int[][] Kd;
+
+        public KeyCacheEntry() {
+            Ke = new int[ROUNDS + 1][BC];
+            Kd = new int[ROUNDS + 1][BC];
+        }
+
+        /** @since 0.9.31 */
+        public KeyCacheEntry(int rounds, int bc) {
+            Ke = new int[rounds + 1][bc];
+            Kd = new int[rounds + 1][bc];
+        }
     }
 }

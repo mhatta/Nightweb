@@ -15,8 +15,9 @@ import net.i2p.data.DataHelper;
  */
 public class I2PSocketAddress extends SocketAddress {
 
+    private static final long serialVersionUID = 1L;
     private final int _port;
-    private Destination _dest;
+    private transient Destination _dest;
     private final String _host;
 
     /**
@@ -25,12 +26,12 @@ public class I2PSocketAddress extends SocketAddress {
      *  Does a naming service lookup to resolve the dest.
      *  May take several seconds for b32.
      *  @param host hostname or b64 dest or b32, may have :port appended
-     *  @throws IllegalArgumentException for port < 0 or port > 65535 or invalid port
+     *  @throws IllegalArgumentException for port &lt; 0 or port &gt; 65535 or invalid port
      *  @since 0.9.9
      */
     public I2PSocketAddress(String host) {
         int port = 0;
-        int colon = host.indexOf(":");
+        int colon = host.indexOf(':');
         if (colon > 0) {
             try {
                 port = Integer.parseInt(host.substring(colon + 1));
@@ -50,7 +51,7 @@ public class I2PSocketAddress extends SocketAddress {
 
     /**
      *  Does not do a reverse lookup. Host will be null.
-     *  @throws IllegalArgumentException for port < 0 or port > 65535
+     *  @throws IllegalArgumentException for port &lt; 0 or port &gt; 65535
      */
     public I2PSocketAddress(Destination dest, int port) {
         if (dest == null)
@@ -65,7 +66,7 @@ public class I2PSocketAddress extends SocketAddress {
     /**
      *  Does a naming service lookup to resolve the dest.
      *  May take several seconds for b32.
-     *  @throws IllegalArgumentException for port < 0 or port > 65535
+     *  @throws IllegalArgumentException for port &lt; 0 or port &gt; 65535
      */
     public I2PSocketAddress(String host, int port) {
         if (port < 0 || port > 65535)
@@ -76,7 +77,7 @@ public class I2PSocketAddress extends SocketAddress {
     }
 
     /**
-     *  @throws IllegalArgumentException for port < 0 or port > 65535
+     *  @throws IllegalArgumentException for port &lt; 0 or port &gt; 65535
      */
     public static I2PSocketAddress createUnresolved(String host, int port) {
         return new I2PSocketAddress(port, host);

@@ -44,7 +44,7 @@ public class RequestVariableLeaseSetMessage extends I2CPMessageImpl {
      *  Does the client support this message?
      *
      *  @param clientVersion may be null
-     *  @return version != null and version >= 0.9.7
+     *  @return version != null and version &gt;= 0.9.7
      */
     public static boolean isSupported(String clientVersion) {
         return clientVersion != null &&
@@ -52,6 +52,16 @@ public class RequestVariableLeaseSetMessage extends I2CPMessageImpl {
     }
 
     public SessionId getSessionId() {
+        return _sessionId;
+    }
+
+    /**
+     * Return the SessionId for this message.
+     *
+     * @since 0.9.21
+     */
+    @Override
+    public SessionId sessionId() {
         return _sessionId;
     }
 

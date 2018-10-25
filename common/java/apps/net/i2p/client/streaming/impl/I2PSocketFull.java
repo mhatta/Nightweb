@@ -22,7 +22,6 @@ class I2PSocketFull implements I2PSocket {
     private volatile Connection _connection;
     private final Destination _remotePeer;
     private final Destination _localPeer;
-    private volatile MessageChannel _channel;
     private final AtomicBoolean _closed = new AtomicBoolean();
     
     public I2PSocketFull(Connection con, I2PAppContext context) {
@@ -52,6 +51,8 @@ class I2PSocketFull implements I2PSocket {
         }
         Connection c = _connection;
         if (c == null) return;
+        if (log.shouldLog(Log.INFO))
+            log.info("close() called, connected? " + c.getIsConnected() + " : " + c, new Exception());
         if (c.getIsConnected()) {
             MessageInputStream in = c.getInputStream();
             in.close();
@@ -62,6 +63,32 @@ class I2PSocketFull implements I2PSocket {
             c.windowAdjusted();
         } else {
             //throw new IOException("Not connected");
+        }
+        destroy();
+    }
+    
+    /**
+     *  Resets and closes this socket. Sends a RESET indication to the far-end.
+     *  This is the equivalent of setSoLinger(true, 0) followed by close() on a Java Socket.
+     *
+     *  Nonblocking.
+     *  Any thread currently blocked in an I/O operation upon this socket will throw an IOException.
+     *  Once a socket has been reset, it is not available for further networking use
+     *  (i.e. can't be reconnected or rebound). A new socket needs to be created.
+     *  Resetting this socket will also close the socket's InputStream and OutputStream.
+     *
+     *  @since 0.9.30
+     */
+    public void reset() throws IOException {
+        Connection c = _connection;
+        if (c == null) return;
+        if (log.shouldLog(Log.INFO))
+            log.info("reset() called, connected? " + c.getIsConnected() + " : " + c, new Exception());
+        if (c.getIsConnected()) {
+            c.disconnect(false);
+            // this will cause any thread waiting in Connection.packetSendChoke()
+            // to throw an IOE
+            c.windowAdjusted();
         }
         destroy();
     }
@@ -89,12 +116,15 @@ class I2PSocketFull implements I2PSocket {
     }
 
     /**
+     *  Unimplemented, unlikely to ever be implemented.
+     *
+     *  @deprecated
+     *  @return null always
      *  @since 0.8.9
      */
+    @Deprecated
     public synchronized SelectableChannel getChannel() {
-        if (_channel == null)
-            _channel = new MessageChannel(this);
-        return _channel;
+        return null;
     }
     
     /**
@@ -135,10 +165,15 @@ class I2PSocketFull implements I2PSocket {
         Connection c = _connection;
         if (c == null) return;
         
+        if (ms > Integer.MAX_VALUE)
+            ms = Integer.MAX_VALUE;
         c.getInputStream().setReadTimeout((int)ms);
         c.getOptions().setReadTimeout(ms);
     }
     
+    /**
+     *  Deprecated, unimplemented, does nothing
+     */
     public void setSocketErrorListener(I2PSocket.SocketErrorListener lsnr) {
     }
     

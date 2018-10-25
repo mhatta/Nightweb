@@ -17,13 +17,14 @@ import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import net.i2p.crypto.SHA256Generator;
+import net.i2p.data.DataHelper;
 import net.i2p.data.Hash;
-import net.i2p.data.RouterAddress;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterAddress;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.router.NetworkDatabaseFacade;
 import net.i2p.router.RouterContext;
 import net.i2p.router.tunnel.pool.TunnelPeerSelector;
+import net.i2p.router.util.MaskedIPSet;
 import net.i2p.router.util.RandomIterator;
 import net.i2p.stat.Rate;
 import net.i2p.stat.RateStat;
@@ -156,6 +157,11 @@ public class ProfileOrganizer {
      * Blocking if a reorganize is happening.
      */
     public PeerProfile getProfile(Hash peer) {
+        if (peer.equals(_us)) {
+            if (_log.shouldWarn())
+                _log.warn("Who wanted our own profile?", new Exception("I did"));
+            return null;
+        }
         getReadLock();
         try {
             return locked_getProfile(peer);
@@ -168,6 +174,11 @@ public class ProfileOrganizer {
      * @since 0.8.12
      */
     public PeerProfile getProfileNonblocking(Hash peer) {
+        if (peer.equals(_us)) {
+            if (_log.shouldWarn())
+                _log.warn("Who wanted our own profile?", new Exception("I did"));
+            return null;
+        }
         if (tryReadLock()) {
             try {
                 return locked_getProfile(peer);
@@ -184,7 +195,11 @@ public class ProfileOrganizer {
         if (profile == null) return null;
 
         Hash peer = profile.getPeer();
-        if (peer == null) return null;
+        if (peer.equals(_us)) {
+            if (_log.shouldWarn())
+                _log.warn("Who added our own profile?", new Exception("I did"));
+            return null;
+        }
 
         if (_log.shouldLog(Log.DEBUG))
             _log.debug("New profile created for " + peer);
@@ -226,6 +241,7 @@ public class ProfileOrganizer {
     public int countFastPeers() { return count(_fastPeers); }
     public int countHighCapacityPeers() { return count(_highCapacityPeers); }
     /** @deprecated use ProfileManager.getPeersByCapability('f').size() */
+    @Deprecated
     public int countWellIntegratedPeers() { return count(_wellIntegratedPeers); }
     public int countNotFailingPeers() { return count(_notFailingPeers); }
     public int countFailingPeers() { return count(_failingPeers); }
@@ -369,6 +385,29 @@ public class ProfileOrganizer {
     }
     
     /**
+     *  Replaces integer subTierMode argument, for clarity
+     *
+     *  @since 0.9.18
+     */
+    public enum Slice {
+
+        SLICE_ALL(0x00, 0),
+        SLICE_0_1(0x02, 0),
+        SLICE_2_3(0x02, 2),
+        SLICE_0(0x03, 0),
+        SLICE_1(0x03, 1),
+        SLICE_2(0x03, 2),
+        SLICE_3(0x03, 3);
+
+        final int mask, val;
+
+        Slice(int mask, int val) {
+            this.mask = mask;
+            this.val = val;
+        }
+    }
+
+    /**
      * Return a set of Hashes for peers that are both fast and reliable.  If an insufficient
      * number of peers are both fast and reliable, fall back onto high capacity peers, and if that
      * doesn't contain sufficient peers, fall back onto not failing peers, and even THAT doesn't
@@ -389,15 +428,15 @@ public class ProfileOrganizer {
      *    7: return only from group 3
      *</pre>
      */
-    public void selectFastPeers(int howMany, Set<Hash> exclude, Set<Hash> matches, Hash randomKey, int subTierMode) {
+    public void selectFastPeers(int howMany, Set<Hash> exclude, Set<Hash> matches, Hash randomKey, Slice subTierMode) {
         getReadLock();
         try {
-            if (subTierMode > 0) {
+            if (subTierMode != Slice.SLICE_ALL) {
                 int sz = _fastPeers.size();
-                if (sz < 6 || (subTierMode >= 4 && sz < 12))
-                    subTierMode = 0;
+                if (sz < 6 || (subTierMode.mask >= 3 && sz < 12))
+                    subTierMode = Slice.SLICE_ALL;
             }
-            if (subTierMode > 0)
+            if (subTierMode != Slice.SLICE_ALL)
                 locked_selectPeers(_fastPeers, howMany, exclude, matches, randomKey, subTierMode);
             else
                 locked_selectPeers(_fastPeers, howMany, exclude, matches, 2);
@@ -455,6 +494,7 @@ public class ProfileOrganizer {
      *
      * @deprecated unused
      */
+    @Deprecated
     public void selectWellIntegratedPeers(int howMany, Set<Hash> exclude, Set<Hash> matches) {
         selectWellIntegratedPeers(howMany, exclude, matches, 0);
     }
@@ -466,6 +506,7 @@ public class ProfileOrganizer {
      *             not be in the same tunnel. 0 = disable check; 1 = /8; 2 = /16; 3 = /24; 4 = exact IP match
      * @deprecated unused
      */
+    @Deprecated
     public void selectWellIntegratedPeers(int howMany, Set<Hash> exclude, Set<Hash> matches, int mask) {
         getReadLock();
         try {
@@ -530,15 +571,16 @@ public class ProfileOrganizer {
      * Caution, this does NOT cascade further to non-connected peers, so it should only
      * be used when there is a good number of connected peers.
      *
-     * @param exclude non-null
+     * @param exclude non-null, WARNING - side effect, all not-connected peers are added
      * No mask parameter, to be fixed
      */
     public void selectActiveNotFailingPeers(int howMany, Set<Hash> exclude, Set<Hash> matches) {
         if (matches.size() < howMany) {
+            Set<Hash> connected = _context.commSystem().getEstablished();
             getReadLock();
             try {
                 for (Hash peer : _notFailingPeers.keySet()) {
-                    if (!_context.commSystem().isEstablished(peer))
+                    if (!connected.contains(peer))
                         exclude.add(peer);
                 }
                 locked_selectPeers(_notFailingPeers, howMany, exclude, matches, 0);
@@ -561,12 +603,14 @@ public class ProfileOrganizer {
      */
     private void selectActiveNotFailingPeers2(int howMany, Set<Hash> exclude, Set<Hash> matches, int mask) {
         if (matches.size() < howMany) {
-            Map<Hash, PeerProfile> activePeers = new HashMap<Hash, PeerProfile>();
+            Set<Hash> connected = _context.commSystem().getEstablished();
+            Map<Hash, PeerProfile> activePeers = new HashMap<Hash, PeerProfile>(connected.size());
             getReadLock();
             try {
-                for (Map.Entry<Hash, PeerProfile> e : _notFailingPeers.entrySet()) {
-                    if (_context.commSystem().isEstablished(e.getKey()))
-                        activePeers.put(e.getKey(), e.getValue());
+                for (Hash peer : connected) {
+                    PeerProfile prof = _notFailingPeers.get(peer);
+                    if (prof != null)
+                        activePeers.put(peer, prof);
                 }
                 locked_selectPeers(activePeers, howMany, exclude, matches, mask);
             } finally { releaseReadLock(); }
@@ -675,9 +719,9 @@ public class ProfileOrganizer {
                 //     they probably don't have a TCP hole punched in their firewall either.
                 RouterInfo info = _context.netDb().lookupRouterInfoLocally(peer);
                 if (info != null) {
-                    String v = info.getOption("router.version");
+                    String v = info.getVersion();
                     // this only works if there is no 0.6.1.34!
-                    if (v != null && (!v.equals("0.6.1.33")) &&
+                    if ((!v.equals("0.6.1.33")) &&
                         v.startsWith("0.6.1.") && info.getTargetAddress("NTCP") == null)
                         l.add(peer);
                     else {
@@ -1197,12 +1241,15 @@ public class ProfileOrganizer {
     }
 
     /**
+      *
+      * As of 0.9.24, checks for a netdb family match as well, unless mask == 0.
+      *
      * @param mask 0-4 Number of bytes to match to determine if peers in the same IP range should
      *             not be in the same tunnel. 0 = disable check; 1 = /8; 2 = /16; 3 = /24; 4 = exact IP match
      */
     private void locked_selectPeers(Map<Hash, PeerProfile> peers, int howMany, Set<Hash> toExclude, Set<Hash> matches, int mask) {
         List<Hash> all = new ArrayList<Hash>(peers.keySet());
-        Set<Integer> IPSet = new HashSet<Integer>(8);
+        MaskedIPSet IPSet = new MaskedIPSet(16);
         // use RandomIterator to avoid shuffling the whole thing
         for (Iterator<Hash> iter = new RandomIterator<Hash>(all); (matches.size() < howMany) && iter.hasNext(); ) {
             Hash peer = iter.next();
@@ -1228,67 +1275,18 @@ public class ProfileOrganizer {
     /**
      * Does the peer's IP address NOT match the IP address of any peer already in the set,
      * on any transport, within a given mask?
+     *
+     * As of 0.9.24, checks for a netdb family match as well.
+     *
      * @param mask is 1-4 (number of bytes to match)
      * @param IPMatches all IPs so far, modified by this routine
      */
-    private boolean notRestricted(Hash peer, Set<Integer> IPSet, int mask) {
-        Set<Integer> peerIPs = maskedIPSet(peer, mask);
-        if (containsAny(IPSet, peerIPs))
+    private boolean notRestricted(Hash peer, MaskedIPSet IPSet, int mask) {
+        Set<String> peerIPs = new MaskedIPSet(_context, peer, mask);
+        if (IPSet.containsAny(peerIPs))
             return false;
         IPSet.addAll(peerIPs);
         return true;
-    }
-
-    /**
-      * The Set of IPs for this peer, with a given mask.
-      * Includes the comm system's record of the IP, and all netDb addresses.
-      *
-      * @return an opaque set of masked IPs for this peer
-      */
-    private Set<Integer> maskedIPSet(Hash peer, int mask) {
-        Set<Integer> rv = new HashSet<Integer>(4);
-        byte[] commIP = _context.commSystem().getIP(peer);
-        if (commIP != null)
-            rv.add(maskedIP(commIP, mask));
-        RouterInfo pinfo = _context.netDb().lookupRouterInfoLocally(peer);
-        if (pinfo == null)
-            return rv;
-        Collection<RouterAddress> paddr = pinfo.getAddresses();
-        for (RouterAddress pa : paddr) {
-            byte[] pib = pa.getIP();
-            if (pib == null) continue;
-            rv.add(maskedIP(pib, mask));
-        }
-        return rv;
-    }
-
-    /**
-     * generate an arbitrary unique value for this ip/mask (mask = 1-4)
-     * If IPv6, force mask = 8.
-     */
-    private static Integer maskedIP(byte[] ip, int mask) {
-        int rv = ip[0];
-        if (ip.length == 16) {
-            for (int i = 1; i < 8; i++) {
-                rv <<= i * 4;
-                rv ^= ip[i];
-            }
-        } else {
-            for (int i = 1; i < mask; i++) {
-                rv <<= 8;
-                rv ^= ip[i];
-            }
-        }
-        return Integer.valueOf(rv);
-    }
-
-    /** does a contain any of the elements in b? */
-    private static <T> boolean  containsAny(Set<T> a, Set<T> b) {
-        for (T o : b) {
-            if (a.contains(o))
-                return true;
-        }
-        return false;
     }
 
     /**
@@ -1303,7 +1301,8 @@ public class ProfileOrganizer {
      *    7: return only from group 3
      *</pre>
      */
-    private void locked_selectPeers(Map<Hash, PeerProfile> peers, int howMany, Set<Hash> toExclude, Set<Hash> matches, Hash randomKey, int subTierMode) {
+    private void locked_selectPeers(Map<Hash, PeerProfile> peers, int howMany, Set<Hash> toExclude,
+                                    Set<Hash> matches, Hash randomKey, Slice subTierMode) {
         List<Hash> all = new ArrayList<Hash>(peers.keySet());
         // use RandomIterator to avoid shuffling the whole thing
         for (Iterator<Hash> iter = new RandomIterator<Hash>(all); (matches.size() < howMany) && iter.hasNext(); ) {
@@ -1315,13 +1314,8 @@ public class ProfileOrganizer {
             if (_us.equals(peer))
                 continue;
             int subTier = getSubTier(peer, randomKey);
-            if (subTierMode >= 4) {
-                if (subTier != (subTierMode & 0x03))
-                    continue;
-            } else {
-                if ((subTier >> 1) != (subTierMode & 0x01))
-                    continue;
-            }
+            if ((subTier & subTierMode.mask) != subTierMode.val)
+                continue;
             boolean ok = isSelectable(peer);
             if (ok)
                 matches.add(peer);
@@ -1335,12 +1329,13 @@ public class ProfileOrganizer {
      *  others.
      *  @return 0-3
      */
-    private static int getSubTier(Hash peer, Hash randomKey) {
-        byte[] data = new byte[Hash.HASH_LENGTH + 4];
-        System.arraycopy(peer.getData(), 0, data, 0, Hash.HASH_LENGTH);
-        System.arraycopy(randomKey.getData(), 0, data, Hash.HASH_LENGTH, 4);
-        Hash rh = SHA256Generator.getInstance().calculateHash(data);
-        return rh.getData()[0] & 0x03;
+    private int getSubTier(Hash peer, Hash randomKey) {
+        // input is first 64 bytes; output is last 32 bytes
+        byte[] data = new byte[96];
+        System.arraycopy(peer.getData(), 0, data, 0, 32);
+        System.arraycopy(randomKey.getData(), 0, data, 32, 32);
+        _context.sha().calculateHash(data, 0, 64, data, 64);
+        return data[64] & 0x03;
     }
 
     public boolean isSelectable(Hash peer) {
@@ -1356,7 +1351,7 @@ public class ProfileOrganizer {
             
         RouterInfo info = _context.netDb().lookupRouterInfoLocally(peer);
         if (null != info) {
-            if (info.getIdentity().isHidden()) {
+            if (info.isHidden()) {
                if (_log.shouldLog(Log.WARN))
                     _log.warn("Peer " + peer.toBase64() + " is marked as hidden, disallowing its use");
                 return false;
@@ -1405,7 +1400,8 @@ public class ProfileOrganizer {
             // if not selectable for a tunnel (banlisted for example),
             // don't allow them in the high-cap pool, what would the point of that be?
             if (_thresholdCapacityValue <= profile.getCapacityValue() &&
-                isSelectable(peer)) {
+                isSelectable(peer) &&
+                !_context.commSystem().isInBadCountry(peer)) {
                 _highCapacityPeers.put(peer, profile);
                 if (_log.shouldLog(Log.DEBUG))
                     _log.debug("High capacity: \t" + peer);

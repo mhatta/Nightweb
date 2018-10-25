@@ -30,6 +30,7 @@ import net.i2p.data.DataHelper;
  *
  * @deprecated unused, for command line client only, commented out in Snark.java
  */
+@Deprecated
 class PeerMonitorTask implements Runnable
 {
   final static long MONITOR_PERIOD = 10 * 1000; // Ten seconds.
@@ -37,8 +38,8 @@ class PeerMonitorTask implements Runnable
 
   private final PeerCoordinator coordinator;
 
-  private long lastDownloaded = 0;
-  private long lastUploaded = 0;
+  //private long lastDownloaded = 0;
+  //private long lastUploaded = 0;
 
   PeerMonitorTask(PeerCoordinator coordinator)
   {

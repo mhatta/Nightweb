@@ -57,6 +57,7 @@ class TimedWeightedPriorityMessageQueue implements MessageQueue, OutboundMessage
      *                  specifically, this means how many messages in this queue
      *                  should be pulled off in a row before moving on to the next.
      */
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     public TimedWeightedPriorityMessageQueue(RouterContext ctx, int[] priorityLimits, int[] weighting, FailedListener lsnr) {
         _context = ctx;
         _log = ctx.logManager().getLog(TimedWeightedPriorityMessageQueue.class);
@@ -124,7 +125,7 @@ class TimedWeightedPriorityMessageQueue implements MessageQueue, OutboundMessage
                 int currentQueue = (_nextQueue + i) % _queue.length;
                 synchronized (_queue[currentQueue]) {
                     for (int j = 0; j < _queue[currentQueue].size(); j++) {
-                        OutNetMessage msg = (OutNetMessage)_queue[currentQueue].get(j);
+                        OutNetMessage msg = _queue[currentQueue].get(j);
                         Hash to = msg.getTarget().getIdentity().getHash();
                         if (_chokedPeers.contains(to))
                             continue;
@@ -239,7 +240,7 @@ class TimedWeightedPriorityMessageQueue implements MessageQueue, OutboundMessage
                 for (int i = 0; i < _queue.length; i++) {
                     synchronized (_queue[i]) {
                         for (int j = 0; j < _queue[i].size(); j++) {
-                            OutNetMessage m = (OutNetMessage)_queue[i].get(j);
+                            OutNetMessage m = _queue[i].get(j);
                             if (m.getExpiration() < now) {
                                 _bytesQueued[i] -= m.getMessageSize();
                                 removed.add(m);
@@ -252,7 +253,7 @@ class TimedWeightedPriorityMessageQueue implements MessageQueue, OutboundMessage
                 }
                 
                 for (int i = 0; i < removed.size(); i++) {
-                    OutNetMessage m = (OutNetMessage)removed.get(i);
+                    OutNetMessage m = removed.get(i);
                     m.timestamp("expirer killed it");
                     _listener.failed(m, "expired before getting on the active pool");
                 }

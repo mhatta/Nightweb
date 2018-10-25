@@ -74,6 +74,21 @@ class InboundMessageFragments /*implements UDPTransport.PartialACKSource */{
      * Pull the fragments and ACKs out of the authenticated data packet
      */
     public void receiveData(PeerState from, UDPPacketReader.DataReader data) {
+        try {
+            rcvData(from, data);
+        } catch (DataFormatException dfe) {
+            if (_log.shouldLog(Log.WARN))
+                _log.warn("Bad pkt from: " + from, dfe);
+        } catch (IndexOutOfBoundsException ioobe) {
+            if (_log.shouldLog(Log.WARN))
+                _log.warn("Bad pkt from: " + from, ioobe);
+        }
+    }
+
+    /**
+     * Pull the fragments and ACKs out of the authenticated data packet
+     */
+    private void rcvData(PeerState from, UDPPacketReader.DataReader data) throws DataFormatException {
         //long beforeMsgs = _context.clock().now();
         int fragmentsIncluded = receiveMessages(from, data);
         //long afterMsgs = _context.clock().now();
@@ -95,7 +110,7 @@ class InboundMessageFragments /*implements UDPTransport.PartialACKSource */{
      *
      * @return number of data fragments included
      */
-    private int receiveMessages(PeerState from, UDPPacketReader.DataReader data) {
+    private int receiveMessages(PeerState from, UDPPacketReader.DataReader data) throws DataFormatException {
         int fragments = data.readFragmentCount();
         if (fragments <= 0) return fragments;
         Hash fromPeer = from.getRemotePeer();
@@ -132,11 +147,7 @@ class InboundMessageFragments /*implements UDPTransport.PartialACKSource */{
                 boolean isNew = false;
                 state = messages.get(messageId);
                 if (state == null) {
-                    try {
-                        state = new InboundMessageState(_context, mid, fromPeer, data, i);
-                    } catch (DataFormatException dfe) {
-                        break;
-                    }
+                    state = new InboundMessageState(_context, mid, fromPeer, data, i);
                     isNew = true;
                     fragmentOK = true;
                     // we will add to messages shortly if it isn't complete
@@ -199,14 +210,14 @@ class InboundMessageFragments /*implements UDPTransport.PartialACKSource */{
     /**
      *  @return the number of bitfields in the ack? why?
      */
-    private int receiveACKs(PeerState from, UDPPacketReader.DataReader data) {
+    private int receiveACKs(PeerState from, UDPPacketReader.DataReader data) throws DataFormatException {
         int rv = 0;
         boolean newAck = false;
         if (data.readACKsIncluded()) {
             int ackCount = data.readACKCount();
             if (ackCount > 0) {
                 rv += ackCount;
-                _context.statManager().addRateData("udp.receivedACKs", ackCount, 0);
+                _context.statManager().addRateData("udp.receivedACKs", ackCount);
                 //_context.statManager().getStatLog().addData(from.getRemoteHostId().toString(), "udp.peer.receiveACKCount", acks.length, 0);
 
                 for (int i = 0; i < ackCount; i++) {
@@ -249,7 +260,7 @@ class InboundMessageFragments /*implements UDPTransport.PartialACKSource */{
         // By calling add(), this also is a failsafe against possible
         // races in OutboundMessageFragments.
         if (newAck && from.getOutboundMessageCount() > 0)
-            _outbound.add(from);
+            _outbound.add(from, 0);
 
         return rv;
     }

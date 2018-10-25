@@ -10,10 +10,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import net.i2p.I2PAppContext;
 import net.i2p.app.ClientAppManager;
 import net.i2p.data.Hash;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.RoutingKeyGenerator;
+import net.i2p.data.router.RouterInfo;
+import net.i2p.data.router.RouterKeyGenerator;
 import net.i2p.internal.InternalClientManager;
 import net.i2p.router.client.ClientManagerFacadeImpl;
+import net.i2p.router.crypto.TransientSessionKeyManager;
 import net.i2p.router.dummy.*;
+import net.i2p.router.message.GarlicMessageParser;
 import net.i2p.router.networkdb.kademlia.FloodfillNetworkDatabaseFacade;
 import net.i2p.router.peermanager.PeerManagerFacadeImpl;
 import net.i2p.router.peermanager.ProfileManagerImpl;
@@ -24,7 +28,6 @@ import net.i2p.router.transport.FIFOBandwidthLimiter;
 import net.i2p.router.transport.OutboundMessageRegistry;
 import net.i2p.router.tunnel.TunnelDispatcher;
 import net.i2p.router.tunnel.pool.TunnelPoolManager;
-import net.i2p.update.UpdateManager;
 import net.i2p.util.KeyRing;
 import net.i2p.util.I2PProperties.I2PPropertyCallback;
 import net.i2p.util.SystemVersion;
@@ -60,10 +63,11 @@ public class RouterContext extends I2PAppContext {
     private Banlist _banlist;
     private Blocklist _blocklist;
     private MessageValidator _messageValidator;
-    private UpdateManager _updateManager;
     //private MessageStateMonitor _messageStateMonitor;
     private RouterThrottle _throttle;
     private RouterAppManager _appManager;
+    private RouterKeyGenerator _routingKeyGenerator;
+    private GarlicMessageParser _garlicMessageParser;
     private final Set<Runnable> _finalShutdownTasks;
     // split up big lock on this to avoid deadlocks
     private volatile boolean _initialized;
@@ -80,7 +84,20 @@ public class RouterContext extends I2PAppContext {
      *  Caller MUST call initAll() after instantiation.
      */
     public RouterContext(Router router, Properties envProps) { 
-        super(filterProps(envProps));
+        this(router, envProps, true);
+    }
+
+    /**
+     *  Caller MUST call initAll() after instantiation.
+     *  NOT a public API, for use by Router only, NOT for external use.
+     *
+     *  @param doInit should this context be used as the global one (if necessary)?
+     *                Will only apply if there is no global context now.
+     *                If false, caller should call setGlobalContext() afterwards.
+     *  @since 0.9.33
+     */
+    RouterContext(Router router, Properties envProps, boolean doInit) { 
+        super(doInit, filterProps(envProps));
         _router = router;
         // Disabled here so that the router can get a context and get the
         // directory locations from it, to do an update, without having
@@ -90,7 +107,24 @@ public class RouterContext extends I2PAppContext {
         if (!_contexts.isEmpty())
             System.err.println("Warning - More than one router in this JVM");
         _finalShutdownTasks = new CopyOnWriteArraySet<Runnable>();
-        _contexts.add(this);
+        if (doInit) {
+            // Bad practice, adding this to static List in constructor.
+            // doInit will be false when instantiated via Router.
+            _contexts.add(this);
+        }
+    }
+    
+    /**
+     * Sets the default context, unless there is one already.
+     * NOT a public API, for use by Router only, NOT for external use.
+     *
+     * @param ctx context constructed with doInit = false
+     * @return success (false if previously set)
+     * @since 0.9.33
+     */
+    static boolean setGlobalContext(RouterContext ctx) {
+        _contexts.add(ctx);
+        return I2PAppContext.setGlobalContext(ctx);
     }
 
     /**
@@ -116,8 +150,9 @@ public class RouterContext extends I2PAppContext {
             // or about 2 seconds per buffer - so about 200x faster
             // to fill than to drain - so we don't need too many
             long maxMemory = SystemVersion.getMaxMemory();
-            long buffs = Math.min(16, Math.max(2, maxMemory / (14 * 1024 * 1024)));
-            envProps.setProperty("prng.buffers", "" + buffs);
+            long maxBuffs = (SystemVersion.isAndroid() || SystemVersion.isARM()) ? 4 : 8;
+            long buffs = Math.min(maxBuffs, Math.max(2, maxMemory / (21 * 1024 * 1024)));
+            envProps.setProperty("prng.buffers", Long.toString(buffs));
         }
         return envProps;
     }
@@ -131,6 +166,7 @@ public class RouterContext extends I2PAppContext {
      * @since 0.8.4
      * @deprecated Use Router.saveConfig()
      */
+    @Deprecated
     public void setProperty(String propName, String value) {
     		_overrideProps.setProperty(propName, value);
     }
@@ -175,13 +211,16 @@ public class RouterContext extends I2PAppContext {
             _clientManagerFacade = new DummyClientManagerFacade(this);
             // internal client manager is null
         }
+        _garlicMessageParser = new GarlicMessageParser(this);
         _clientMessagePool = new ClientMessagePool(this);
         _jobQueue = new JobQueue(this);
+        _jobQueue.startup();
         _inNetMessagePool = new InNetMessagePool(this);
         _outNetMessagePool = new OutNetMessagePool(this);
         _messageHistory = new MessageHistory(this);
         _messageRegistry = new OutboundMessageRegistry(this);
         //_messageStateMonitor = new MessageStateMonitor(this);
+        _routingKeyGenerator = new RouterKeyGenerator(this);
         if (!getBooleanProperty("i2p.dummyNetDb"))
             _netDb = new FloodfillNetworkDatabaseFacade(this); // new KademliaNetworkDatabaseFacade(this);
         else
@@ -254,6 +293,9 @@ public class RouterContext extends I2PAppContext {
     /**
      *  Convenience method for getting the router hash.
      *  Equivalent to context.router().getRouterInfo().getIdentity().getHash()
+     *
+     *  Warning - risk of deadlock - do not call while holding locks
+     *
      *  @return may be null if called very early
      */
     public Hash routerHash() {
@@ -477,8 +519,11 @@ public class RouterContext extends I2PAppContext {
     @Override
     protected void initializeClock() {
         synchronized (_lock1) {
-            if (_clock == null)
-                _clock = new RouterClock(this);
+            if (_clock == null) {
+                RouterClock rc = new RouterClock(this);
+                rc.start();
+                _clock = rc;
+            }
             _clockInitialized = true;
         }
     }
@@ -547,42 +592,6 @@ public class RouterContext extends I2PAppContext {
     }
 
     /**
-     *  The controller of router, plugin, and other updates.
-     *  @return The manager if it is registered, else null
-     *  @since 0.9.4
-     */
-    @Override
-    public UpdateManager updateManager() {
-        return _updateManager;
-    }
-
-    /**
-     *  Register as the update manager.
-     *  @throws IllegalStateException if one was already registered
-     *  @since 0.9.4
-     */
-    public void registerUpdateManager(UpdateManager mgr) {
-        synchronized(_lock3) {
-            if (_updateManager != null)
-                throw new IllegalStateException();
-            _updateManager = mgr;
-        }
-    }
-
-    /**
-     *  Unregister the update manager.
-     *  @throws IllegalStateException if it was not registered
-     *  @since 0.9.4
-     */
-    public void unregisterUpdateManager(UpdateManager mgr) {
-        synchronized(_lock3) {
-            if (_updateManager != mgr)
-                throw new IllegalStateException();
-            _updateManager = null;
-        }
-    }
-
-    /**
      *  The RouterAppManager.
      *  @return the manager
      *  @since 0.9.4
@@ -600,5 +609,62 @@ public class RouterContext extends I2PAppContext {
      */
     public RouterAppManager routerAppManager() {
         return _appManager;
+    }
+
+    /**
+     *  As of 0.9.15, this returns a dummy SessionKeyManager in I2PAppContext.
+     *  Overridden in RouterContext to return the full TransientSessionKeyManager.
+     *
+     *  @since 0.9.15
+     */
+    @Override
+    protected void initializeSessionKeyManager() {
+        synchronized (_lock3) {
+            if (_sessionKeyManager == null) 
+                //_sessionKeyManager = new PersistentSessionKeyManager(this);
+                _sessionKeyManager = new TransientSessionKeyManager(this);
+            _sessionKeyManagerInitialized = true;
+        }
+    }
+    
+    /**
+     * Determine how much do we want to mess with the keys to turn them 
+     * into something we can route.  This is context specific because we 
+     * may want to test out how things react when peers don't agree on 
+     * how to skew.
+     *
+     * Returns same thing as routerKeyGenerator()
+     *
+     * @return non-null
+     * @since 0.9.16 Overrides I2PAppContext. Returns non-null in RouterContext and null in I2PAppcontext.
+     */
+    @Override
+    public RoutingKeyGenerator routingKeyGenerator() {
+        return _routingKeyGenerator;
+    }
+
+    /**
+     * Determine how much do we want to mess with the keys to turn them 
+     * into something we can route.  This is context specific because we 
+     * may want to test out how things react when peers don't agree on 
+     * how to skew.
+     *
+     * Returns same thing as routingKeyGenerator()
+     *
+     * @return non-null
+     * @since 0.9.16
+     */
+    public RouterKeyGenerator routerKeyGenerator() {
+        return _routingKeyGenerator;
+    }
+
+    /**
+     * Since we only need one.
+     *
+     * @return non-null after initAll()
+     * @since 0.9.20
+     */
+    public GarlicMessageParser garlicMessageParser() {
+        return _garlicMessageParser;
     }
 }

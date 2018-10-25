@@ -1,6 +1,7 @@
 package net.i2p.router.transport.udp;
 
 import java.net.InetAddress;
+import java.net.Inet6Address;
 import java.net.UnknownHostException;
 import java.util.Map;
 import java.util.Queue;
@@ -9,12 +10,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import net.i2p.data.Base64;
 import net.i2p.data.DataHelper;
-import net.i2p.data.RouterAddress;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterAddress;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.data.SessionKey;
-import net.i2p.router.CommSystemFacade;
+import net.i2p.router.CommSystemFacade.Status;
 import net.i2p.router.RouterContext;
 import static net.i2p.router.transport.udp.PeerTestState.Role.*;
+import net.i2p.router.transport.TransportUtil;
 import net.i2p.util.Addresses;
 import net.i2p.util.Log;
 import net.i2p.util.SimpleTimer;
@@ -186,7 +188,7 @@ class PeerTestManager {
                 _log.warn("Not running test with Bob too close to us " + bobIP);
             return;
         }
-        PeerTestState test = new PeerTestState(ALICE,
+        PeerTestState test = new PeerTestState(ALICE, bobIP instanceof Inet6Address,
                                                _context.random().nextLong(MAX_NONCE),
                                                _context.clock().now());
         test.setBobIP(bobIP);
@@ -206,7 +208,7 @@ class PeerTestManager {
         test.incrementPacketsRelayed();
         sendTestToBob();
         
-        _context.simpleScheduler().addEvent(new ContinueTest(test.getNonce()), RESEND_TIMEOUT);
+        _context.simpleTimer2().addEvent(new ContinueTest(test.getNonce()), RESEND_TIMEOUT);
     }
     
     private class ContinueTest implements SimpleTimer.TimedEvent {
@@ -245,7 +247,7 @@ class PeerTestManager {
                         sendTestToCharlie();
                     }
                     // retx at 4, 10, 17, 25 elapsed time
-                    _context.simpleScheduler().addEvent(ContinueTest.this, RESEND_TIMEOUT + (sent*1000));
+                    _context.simpleTimer2().addEvent(ContinueTest.this, RESEND_TIMEOUT + (sent*1000));
                 }
             }
         }
@@ -266,8 +268,9 @@ class PeerTestManager {
         if (!expired()) {
             if (_log.shouldLog(Log.DEBUG))
                 _log.debug("Sending test to Bob: " + test);
-            _transport.send(_packetBuilder.buildPeerTestFromAlice(test.getBobIP(), test.getBobPort(), test.getBobCipherKey(), test.getBobMACKey(), //_bobIntroKey, 
-                            test.getNonce(), _transport.getIntroKey()));
+            _transport.send(_packetBuilder.buildPeerTestFromAlice(test.getBobIP(), test.getBobPort(),
+                                                                  test.getBobCipherKey(), test.getBobMACKey(), //_bobIntroKey, 
+                                                                  test.getNonce(), _transport.getIntroKey()));
         } else {
             _currentTest = null;
         }
@@ -279,8 +282,9 @@ class PeerTestManager {
         if (!expired()) {
             if (_log.shouldLog(Log.DEBUG))
                 _log.debug("Sending test to Charlie: " + test);
-            _transport.send(_packetBuilder.buildPeerTestFromAlice(test.getCharlieIP(), test.getCharliePort(), test.getCharlieIntroKey(), 
-                            test.getNonce(), _transport.getIntroKey()));
+            _transport.send(_packetBuilder.buildPeerTestFromAlice(test.getCharlieIP(), test.getCharliePort(),
+                                                                  test.getCharlieIntroKey(), 
+                                                                  test.getNonce(), _transport.getIntroKey()));
         } else {
             _currentTest = null;
         }
@@ -312,7 +316,9 @@ class PeerTestManager {
             // The reply is from Bob
 
             int ipSize = testInfo.readIPSize();
-            if (ipSize != 4) {
+            boolean expectV6 = test.isIPv6();
+            if ((!expectV6 && ipSize != 4) ||
+                (expectV6 && ipSize != 16)) {
                 // There appears to be a bug where Bob is sending us a zero-length IP.
                 // We could proceed without setting the IP, but then when Charlie
                 // sends us his message, we will think we are behind a symmetric NAT
@@ -340,10 +346,10 @@ class PeerTestManager {
                 if (_log.shouldLog(Log.DEBUG))
                     _log.debug("Receive test reply from Bob: " + test);
                 if (test.getAlicePortFromCharlie() > 0)
-                    testComplete(false);
+                    testComplete(true);
             } catch (UnknownHostException uhe) {
-                if (_log.shouldLog(Log.ERROR))
-                    _log.error("Unable to get our IP (length " + ipSize +
+                if (_log.shouldLog(Log.WARN))
+                    _log.warn("Unable to get our IP (length " + ipSize +
                                ") from bob's reply: " + from + ", " + testInfo, uhe);
                 _context.statManager().addRateData("udp.testBadIP", 1);
             }
@@ -361,7 +367,7 @@ class PeerTestManager {
                 // why are we doing this instead of calling testComplete() ?
                 _currentTestComplete = true;
                 _context.statManager().addRateData("udp.statusKnownCharlie", 1);
-                honorStatus(CommSystemFacade.STATUS_UNKNOWN);
+                honorStatus(Status.UNKNOWN, test.isIPv6());
                 _currentTest = null;
                 return;
             }
@@ -374,8 +380,11 @@ class PeerTestManager {
                         throw new UnknownHostException("port 0");
                     test.setAlicePortFromCharlie(testPort);
                     byte ip[] = new byte[testInfo.readIPSize()];
-                    if (ip.length != 4)
-                        throw new UnknownHostException("not IPv4");
+                    int ipSize = ip.length;
+                    boolean expectV6 = test.isIPv6();
+                    if ((!expectV6 && ipSize != 4) ||
+                        (expectV6 && ipSize != 16))
+                        throw new UnknownHostException("bad sz - expect v6? " + expectV6 + " act sz: " + ipSize);
                     testInfo.readIP(ip, 0);
                     InetAddress addr = InetAddress.getByAddress(ip);
                     test.setAliceIPFromCharlie(addr);
@@ -430,7 +439,6 @@ class PeerTestManager {
      */
     private void testComplete(boolean forgetTest) {
         _currentTestComplete = true;
-        short status = -1;
         PeerTestState test = _currentTest;
 
         // Don't do this or we won't call honorStatus()
@@ -440,31 +448,34 @@ class PeerTestManager {
         //    return;
         // }
 
+        boolean isIPv6 = test.isIPv6();
+        Status status;
         if (test.getAlicePortFromCharlie() > 0) {
             // we received a second message from charlie
             if ( (test.getAlicePort() == test.getAlicePortFromCharlie()) &&
                  (test.getAliceIP() != null) && (test.getAliceIPFromCharlie() != null) &&
                  (test.getAliceIP().equals(test.getAliceIPFromCharlie())) ) {
-                status = CommSystemFacade.STATUS_OK;
+                status = isIPv6 ? Status.IPV4_UNKNOWN_IPV6_OK : Status.IPV4_OK_IPV6_UNKNOWN;
             } else {
-                status = CommSystemFacade.STATUS_DIFFERENT;
+                // we don't have a SNAT state for IPv6
+                status = isIPv6 ? Status.IPV4_UNKNOWN_IPV6_FIREWALLED : Status.IPV4_SNAT_IPV6_UNKNOWN;
             }
         } else if (test.getReceiveCharlieTime() > 0) {
             // we received only one message from charlie
-            status = CommSystemFacade.STATUS_UNKNOWN;
+            status = Status.UNKNOWN;
         } else if (test.getReceiveBobTime() > 0) {
             // we received a message from bob but no messages from charlie
-            status = CommSystemFacade.STATUS_REJECT_UNSOLICITED;
+            status = isIPv6 ? Status.IPV4_UNKNOWN_IPV6_FIREWALLED : Status.IPV4_FIREWALLED_IPV6_UNKNOWN;
         } else {
             // we never received anything from bob - he is either down, 
             // ignoring us, or unable to get a Charlie to respond
-            status = CommSystemFacade.STATUS_UNKNOWN;
+            status = Status.UNKNOWN;
         }
         
         if (_log.shouldLog(Log.INFO))
             _log.info("Test complete: " + test);
         
-        honorStatus(status);
+        honorStatus(status, isIPv6);
         if (forgetTest)
             _currentTest = null;
     }
@@ -473,11 +484,12 @@ class PeerTestManager {
      * Depending upon the status, fire off different events (using received port/ip/etc as 
      * necessary).
      *
+     *  @param isIPv6 Is the change an IPv6 change?
      */
-    private void honorStatus(short status) {
+    private void honorStatus(Status status, boolean isIPv6) {
         if (_log.shouldLog(Log.INFO))
-            _log.info("Test results: status = " + status);
-        _transport.setReachabilityStatus(status);
+            _log.info("Test results (IPv6? " + isIPv6 + "): status = " + status);
+        _transport.setReachabilityStatus(status, isIPv6);
     }
     
     /**
@@ -493,7 +505,7 @@ class PeerTestManager {
         _context.statManager().addRateData("udp.receiveTest", 1);
         byte[] fromIP = from.getIP();
         int fromPort = from.getPort();
-        if (fromPort < 1024 || fromPort > 65535 ||
+        if (!TransportUtil.isValidPort(fromPort) ||
             (!_transport.isValid(fromIP)) ||
             _transport.isTooClose(fromIP) ||
             _context.blocklist().isBlocklisted(fromIP)) {
@@ -512,10 +524,10 @@ class PeerTestManager {
             testInfo.readIP(testIP, 0);
         }
 
-        if ((testPort > 0 && (testPort < 1024 || testPort > 65535)) ||
+        if ((testPort > 0 && (!TransportUtil.isValidPort(testPort))) ||
             (testIP != null &&
                                ((!_transport.isValid(testIP)) ||
-                                testIP.length != 4 ||
+                                (testIP.length != 4 && testIP.length != 16) ||
                                 _context.blocklist().isBlocklisted(testIP)))) {
             // spoof check, and don't respond to privileged ports
             if (_log.shouldLog(Log.WARN))
@@ -582,6 +594,13 @@ class PeerTestManager {
                         _log.warn("Too many active tests, droppping from Alice " + Addresses.toString(fromIP, fromPort));
                     return;
                 }
+                if (_transport.getPeerState(from) == null) {
+                    // Require an existing session to start a test,
+                    // as a way of preventing trouble
+                    if (_log.shouldLog(Log.WARN))
+                        _log.warn("No session, dropping new test from Alice " + Addresses.toString(fromIP, fromPort));
+                    return;
+                }
                 if (_log.shouldLog(Log.DEBUG))
                     _log.debug("test IP/port are blank coming from " + from + ", assuming we are Bob and they are alice");
                 receiveFromAliceAsBob(from, testInfo, nonce, null);
@@ -635,10 +654,11 @@ class PeerTestManager {
      */
     private void receiveFromBobAsCharlie(RemoteHostId from, UDPPacketReader.PeerTestReader testInfo, long nonce, PeerTestState state) {
         long now = _context.clock().now();
+        int sz = testInfo.readIPSize();
         boolean isNew = false;
         if (state == null) {
             isNew = true;
-            state = new PeerTestState(CHARLIE, nonce, now);
+            state = new PeerTestState(CHARLIE, sz == 16, nonce, now);
         } else {
             if (state.getReceiveBobTime() > now - (RESEND_TIMEOUT / 2)) {
                 if (_log.shouldLog(Log.WARN))
@@ -648,12 +668,13 @@ class PeerTestManager {
         }
 
         // TODO should only do most of this if isNew
-        int sz = testInfo.readIPSize();
         byte aliceIPData[] = new byte[sz];
         try {
             testInfo.readIP(aliceIPData, 0);
-            if (sz != 4)
-                throw new UnknownHostException("not IPv4");
+            boolean expectV6 = state.isIPv6();
+            if ((!expectV6 && sz != 4) ||
+                (expectV6 && sz != 16))
+                throw new UnknownHostException("bad sz - expect v6? " + expectV6 + " act sz: " + sz);
             int alicePort = testInfo.readPort();
             if (alicePort == 0)
                 throw new UnknownHostException("port 0");
@@ -692,13 +713,16 @@ class PeerTestManager {
             
             if (isNew) {
                 _activeTests.put(Long.valueOf(nonce), state);
-                _context.simpleScheduler().addEvent(new RemoveTest(nonce), MAX_CHARLIE_LIFETIME);
+                _context.simpleTimer2().addEvent(new RemoveTest(nonce), MAX_CHARLIE_LIFETIME);
             }
 
-            UDPPacket packet = _packetBuilder.buildPeerTestToBob(bobIP, from.getPort(), aliceIP, alicePort, aliceIntroKey, nonce, state.getBobCipherKey(), state.getBobMACKey());
+            UDPPacket packet = _packetBuilder.buildPeerTestToBob(bobIP, from.getPort(), aliceIP, alicePort,
+                                                                 aliceIntroKey, nonce,
+                                                                 state.getBobCipherKey(), state.getBobMACKey());
             _transport.send(packet);
             
-            packet = _packetBuilder.buildPeerTestToAlice(aliceIP, alicePort, aliceIntroKey, _transport.getIntroKey(), nonce);
+            packet = _packetBuilder.buildPeerTestToAlice(aliceIP, alicePort, aliceIntroKey,
+                                                         _transport.getIntroKey(), nonce);
             _transport.send(packet);
         } catch (UnknownHostException uhe) {
             if (_log.shouldLog(Log.WARN))
@@ -718,22 +742,27 @@ class PeerTestManager {
         // we are Bob, so pick a (potentially) Charlie and send Charlie Alice's info
         PeerState charlie;
         RouterInfo charlieInfo = null;
+        int sz = from.getIP().length;
+        boolean isIPv6 = sz == 16;
         if (state == null) { // pick a new charlie
-            if (from.getIP().length != 4) {
-                if (_log.shouldLog(Log.WARN))
-                    _log.warn("PeerTest over IPv6 from Alice as Bob? " + from);
-                return;
-            }
-            charlie = _transport.pickTestPeer(CHARLIE, from);
+            //if (from.getIP().length != 4) {
+            //    if (_log.shouldLog(Log.WARN))
+            //        _log.warn("PeerTest over IPv6 from Alice as Bob? " + from);
+            //    return;
+            //}
+            charlie = _transport.pickTestPeer(CHARLIE, isIPv6, from);
         } else {
             charlie = _transport.getPeerState(new RemoteHostId(state.getCharlieIP().getAddress(), state.getCharliePort()));
         }
-        if (charlie != null)
-            charlieInfo = _context.netDb().lookupRouterInfoLocally(charlie.getRemotePeer());
-        
-        if ( (charlie == null) || (charlieInfo == null) ) {
+        if (charlie == null) {
             if (_log.shouldLog(Log.WARN))
-                _log.warn("Unable to pick a charlie");
+                _log.warn("Unable to pick a charlie (no peer), IPv6? " + isIPv6);
+            return;
+        }
+        charlieInfo = _context.netDb().lookupRouterInfoLocally(charlie.getRemotePeer());
+        if (charlieInfo == null) {
+            if (_log.shouldLog(Log.WARN))
+                _log.warn("Unable to pick a charlie (no RI), IPv6? " + isIPv6);
             return;
         }
         
@@ -748,14 +777,14 @@ class PeerTestManager {
             RouterAddress raddr = _transport.getTargetAddress(charlieInfo);
             if (raddr == null) {
                 if (_log.shouldLog(Log.WARN))
-                    _log.warn("Unable to pick a charlie");
+                    _log.warn("Unable to pick a charlie (no addr), IPv6? " + isIPv6);
                 return;
             }
             UDPAddress addr = new UDPAddress(raddr);
             byte[] ikey = addr.getIntroKey();
             if (ikey == null) {
                 if (_log.shouldLog(Log.WARN))
-                    _log.warn("Unable to pick a charlie");
+                    _log.warn("Unable to pick a charlie (no ikey), IPv6? " + isIPv6);
                 return;
             }
             SessionKey charlieIntroKey = new SessionKey(ikey);
@@ -767,7 +796,7 @@ class PeerTestManager {
             boolean isNew = false;
             if (state == null) {
                 isNew = true;
-                state = new PeerTestState(BOB, nonce, now);
+                state = new PeerTestState(BOB, isIPv6, nonce, now);
             } else {
                 if (state.getReceiveAliceTime() > now - (RESEND_TIMEOUT / 2)) {
                     if (_log.shouldLog(Log.WARN))
@@ -792,7 +821,7 @@ class PeerTestManager {
             
             if (isNew) {
                 _activeTests.put(Long.valueOf(nonce), state);
-                _context.simpleScheduler().addEvent(new RemoveTest(nonce), MAX_CHARLIE_LIFETIME);
+                _context.simpleTimer2().addEvent(new RemoveTest(nonce), MAX_CHARLIE_LIFETIME);
             }
             
             UDPPacket packet = _packetBuilder.buildPeerTestToCharlie(aliceIP, from.getPort(), aliceIntroKey, nonce, 

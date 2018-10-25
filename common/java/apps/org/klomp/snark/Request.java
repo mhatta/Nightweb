@@ -43,13 +43,32 @@ class Request
    */
   Request(PartialPiece piece, int off, int len)
   {
-    // Sanity check
-    if (off < 0 || len <= 0 || off + len > piece.getLength())
-      throw new IndexOutOfBoundsException("Illegal Request " + toString());
-
     this.piece = piece;
     this.off = off;
     this.len = len;
+
+    // Sanity check
+    if (off < 0 || len <= 0 || off + len > piece.getLength())
+      throw new IndexOutOfBoundsException("Illegal Request " + toString());
+  }
+
+  /**
+   * Dummy Request for PeerState.returnPartialPieces().
+   * len will be zero.
+   *
+   * @param piece Piece number requested.
+   * @param off the offset in the array.
+   * @since 0.9.36
+   */
+  Request(PartialPiece piece, int off)
+  {
+    this.piece = piece;
+    this.off = off;
+    this.len = 0;
+
+    // Sanity check
+    if (off < 0 || off > piece.getLength())
+      throw new IndexOutOfBoundsException("Illegal Request " + toString());
   }
 
   /**

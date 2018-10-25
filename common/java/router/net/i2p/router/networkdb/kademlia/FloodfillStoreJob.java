@@ -20,6 +20,8 @@ import net.i2p.util.Log;
 /**
  *  This extends StoreJob to fire off a FloodfillVerifyStoreJob after success.
  *
+ *  Stores through this class always request a reply.
+ *
  */
 class FloodfillStoreJob extends StoreJob {    
     private final FloodfillNetworkDatabaseFacade _facade;
@@ -56,10 +58,14 @@ class FloodfillStoreJob extends StoreJob {
     protected void succeed() {
         super.succeed();
 
-        if (_state != null) {
             if (_facade.isVerifyInProgress(_state.getTarget())) {
                 if (_log.shouldLog(Log.INFO))
                     _log.info("Skipping verify, one already in progress for: " + _state.getTarget());
+                return;
+            }
+            if (getContext().router().gracefulShutdownInProgress()) {
+                if (_log.shouldLog(Log.INFO))
+                    _log.info("Skipping verify, shutdown in progress for: " + _state.getTarget());
                 return;
             }
             // Get the time stamp from the data we sent, so the Verify job can meke sure that
@@ -81,7 +87,6 @@ class FloodfillStoreJob extends StoreJob {
             } catch (NoSuchElementException nsee) {}
             getContext().jobQueue().addJob(new FloodfillVerifyStoreJob(getContext(), _state.getTarget(),
                                                                        published, isRouterInfo, sentTo, _facade));
-        }
     }
     
     @Override

@@ -25,7 +25,7 @@ public class TunnelGatewayMessage extends FastI2NPMessageImpl {
     //private Exception _creator;
     
     public final static int MESSAGE_TYPE = 19;
-    /** if we can't deliver a tunnel message in 10s, fuck it */
+    /** if we can't deliver a tunnel message in 10s, forget it */
     private static final int EXPIRATION_PERIOD = 10*1000;
     
     public TunnelGatewayMessage(I2PAppContext context) {
@@ -62,7 +62,7 @@ public class TunnelGatewayMessage extends FastI2NPMessageImpl {
         if (_msg != null)
             throw new IllegalStateException();
         if (msg == null)
-            throw new IllegalArgumentException("wtf, dont set me to null");
+            throw new IllegalArgumentException("dont set me to null!");
         _msg = msg; 
     }
     
@@ -95,8 +95,9 @@ public class TunnelGatewayMessage extends FastI2NPMessageImpl {
         curIndex += 2;
         // where is this coming from?
         if (curIndex + _msgData.length > out.length) {
-            _log.log(Log.ERROR, "output buffer too small idx: " + curIndex + " len: " + _msgData.length + " outlen: " + out.length);
-            throw new I2NPMessageException("Too much data to write out (id=" + _tunnelId + " data=" + _msg + ")");
+            String txt = "output buffer too small idx: " + curIndex + " len: " + _msgData.length + " outlen: " + out.length;
+            _log.error(txt);
+            throw new I2NPMessageException(txt);
         }
         System.arraycopy(_msgData, 0, out, curIndex, _msgData.length);
         curIndex += _msgData.length;
@@ -137,7 +138,7 @@ public class TunnelGatewayMessage extends FastI2NPMessageImpl {
         //handler.readMessage(data, curIndex);
         //_msg = handler.lastRead();
         //if (_msg == null)
-        //    throw new I2NPMessageException("wtf, message read has no payload?");
+        //    throw new I2NPMessageException("impossible? message read has no payload?!");
 
         // NEW WAY save lots of effort at the IBGW by reading as an UnknownI2NPMessage instead
         // This will save a lot of object churn and processing,

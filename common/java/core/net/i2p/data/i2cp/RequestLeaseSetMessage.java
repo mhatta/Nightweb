@@ -12,6 +12,7 @@ package net.i2p.data.i2cp;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -28,9 +29,12 @@ import net.i2p.data.TunnelId;
  * @author jrandom
  */
 public class RequestLeaseSetMessage extends I2CPMessageImpl {
+
+    private static final long serialVersionUID = 1L;
     public final static int MESSAGE_TYPE = 21;
     private SessionId _sessionId;
-    private final List<TunnelEndpoint> _endpoints;
+    // ArrayList is Serializable, List is not
+    private final ArrayList<TunnelEndpoint> _endpoints;
     private Date _end;
 
     public RequestLeaseSetMessage() {
@@ -38,6 +42,16 @@ public class RequestLeaseSetMessage extends I2CPMessageImpl {
     }
 
     public SessionId getSessionId() {
+        return _sessionId;
+    }
+
+    /**
+     * Return the SessionId for this message.
+     *
+     * @since 0.9.21
+     */
+    @Override
+    public SessionId sessionId() {
         return _sessionId;
     }
 
@@ -60,6 +74,7 @@ public class RequestLeaseSetMessage extends I2CPMessageImpl {
     }
 
     /** @deprecated unused - presumably he meant remove? */
+    @Deprecated
     public void remoteEndpoint(int endpoint) {
         if ((endpoint >= 0) && (endpoint < _endpoints.size())) _endpoints.remove(endpoint);
     }
@@ -139,7 +154,8 @@ public class RequestLeaseSetMessage extends I2CPMessageImpl {
         return buf.toString();
     }
 
-    private static class TunnelEndpoint {
+    private static class TunnelEndpoint implements Serializable {
+        private static final long serialVersionUID = 1L;
         private final Hash _router;
         private final TunnelId _tunnelId;
 

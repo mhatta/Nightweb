@@ -35,22 +35,24 @@ import net.i2p.util.OrderedProperties;
  * @author jrandom
  */
 public class SessionConfig extends DataStructureImpl {
-    private final Log _log = I2PAppContext.getGlobalContext().logManager().getLog(SessionConfig.class);
     private Destination _destination;
     private Signature _signature;
     private Date _creationDate;
     private Properties _options;
 
     /** 
-     * if the client authorized this session more than the specified period ago, 
-     * refuse it, since it may be a replay attack
+     * If the client authorized this session more than the specified period ago, 
+     * refuse it, since it may be a replay attack.
      *
+     * Really? See also ClientManager.REQUEST_LEASESET_TIMEOUT.
+     * If I2CP replay attacks are a thing, there's a lot more to do.
      */
-    private final static long OFFSET_VALIDITY = 30 * 1000;
+    private final static long OFFSET_VALIDITY = 3*60*1000;
 
     public SessionConfig() {
         this(null);
     }
+
     public SessionConfig(Destination dest) {
         _destination = dest;
         _creationDate = new Date(Clock.getInstance().now());
@@ -92,6 +94,10 @@ public class SessionConfig extends DataStructureImpl {
      * Configure the session with the given options;
      * keys and values 255 bytes (not chars) max each
      *
+     * Defaults in SessionConfig options are, in general, NOT honored.
+     * Defaults are not serialized out-of-JVM, and the router does not recognize defaults in-JVM.
+     * Client side must promote defaults to the primary map.
+     *
      * @param options Properties for this session
      */
     public void setOptions(Properties options) {
@@ -115,45 +121,56 @@ public class SessionConfig extends DataStructureImpl {
     public void signSessionConfig(SigningPrivateKey signingKey) throws DataFormatException {
         byte data[] = getBytes();
         if (data == null) throw new DataFormatException("Unable to retrieve bytes for signing");
+        if (signingKey == null)
+            throw new DataFormatException("No signing key");
         _signature = DSAEngine.getInstance().sign(data, signingKey);
+        if (_signature == null)
+            throw new DataFormatException("Signature failed with " + signingKey.getType() + " key");
     }
 
     /**
      * Verify that the signature matches the destination's signing public key.
      *
+     * Note that this also returns false if the creation date is too far in the
+     * past or future. See tooOld() and getCreationDate().
+     *
      * @return true only if the signature matches
      */
     public boolean verifySignature() {
         if (getSignature() == null) {
-            if (_log.shouldLog(Log.WARN)) _log.warn("Signature is null!");
+            //if (_log.shouldLog(Log.WARN)) _log.warn("Signature is null!");
             return false;
         }
         if (getDestination() == null) {
-            if (_log.shouldLog(Log.WARN)) _log.warn("Destination is null!");
+            //if (_log.shouldLog(Log.WARN)) _log.warn("Destination is null!");
             return false;
         }
         if (getCreationDate() == null) {
-            if (_log.shouldLog(Log.WARN)) _log.warn("Date is null!");
+            //if (_log.shouldLog(Log.WARN)) _log.warn("Date is null!");
             return false;
         }
         if (tooOld()) {
-            if (_log.shouldLog(Log.WARN)) _log.warn("Too old!");
+            //if (_log.shouldLog(Log.WARN)) _log.warn("Too old!");
             return false;
         }
         byte data[] = getBytes();
         if (data == null) {
-            if (_log.shouldLog(Log.WARN)) _log.warn("Bytes could not be found - wtf?");
+            //if (_log.shouldLog(Log.WARN)) _log.warn("Bytes could not be found");
             return false;
         }
 
         boolean ok = DSAEngine.getInstance().verifySignature(getSignature(), data,
                                                              getDestination().getSigningPublicKey());
         if (!ok) {
-            if (_log.shouldLog(Log.WARN)) _log.warn("DSA signature failed!");
+            Log log = I2PAppContext.getGlobalContext().logManager().getLog(SessionConfig.class);
+            if (log.shouldLog(Log.WARN)) log.warn("DSA signature failed!");
         }
         return ok;
     }
 
+    /**
+     *  Misnamed, could be too old or too far in the future.
+     */
     public boolean tooOld() {
         long now = Clock.getInstance().now();
         long earliestValid = now - OFFSET_VALIDITY;
@@ -177,10 +194,12 @@ public class SessionConfig extends DataStructureImpl {
             DataHelper.writeProperties(out, _options, true);  // UTF-8
             DataHelper.writeDate(out, _creationDate);
         } catch (IOException ioe) {
-            _log.error("IOError signing", ioe);
+            Log log = I2PAppContext.getGlobalContext().logManager().getLog(SessionConfig.class);
+            log.error("IOError signing", ioe);
             return null;
         } catch (DataFormatException dfe) {
-            _log.error("Error writing out the bytes for signing/verification", dfe);
+            Log log = I2PAppContext.getGlobalContext().logManager().getLog(SessionConfig.class);
+            log.error("Error writing out the bytes for signing/verification", dfe);
             return null;
         }
         return out.toByteArray();
@@ -190,7 +209,7 @@ public class SessionConfig extends DataStructureImpl {
         _destination = Destination.create(rawConfig);
         _options = DataHelper.readProperties(rawConfig);
         _creationDate = DataHelper.readDate(rawConfig);
-        _signature = new Signature();
+        _signature = new Signature(_destination.getSigningPublicKey().getType());
         _signature.readBytes(rawConfig);
     }
 
@@ -203,7 +222,6 @@ public class SessionConfig extends DataStructureImpl {
         _signature.writeBytes(out);
     }
 
-    /* FIXME missing hashCode() method FIXME */
     @Override
     public boolean equals(Object object) {
         if ((object != null) && (object instanceof SessionConfig)) {
@@ -215,6 +233,11 @@ public class SessionConfig extends DataStructureImpl {
         }
          
         return false;
+    }
+
+    @Override
+    public int hashCode() {
+        return _signature != null ? _signature.hashCode() : 0;
     }
 
     @Override

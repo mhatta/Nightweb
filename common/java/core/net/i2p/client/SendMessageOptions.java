@@ -12,9 +12,14 @@ import net.i2p.data.DateAndFlags;
  *  Static methods are for OutboundClientMessageOneShotJob to decode the
  *  flags field on the router side.
  *
+ *  GzipOption flags are as of 0.9.36, are client-side only, and are
+ *  not included in the flags field or sent to the router.
+ *
  *  @since 0.9.2
  */
 public class SendMessageOptions extends DateAndFlags {
+
+    private GzipOption _gzip = GzipOption.DEFAULT;
 
     /** all subject to change */
 
@@ -47,6 +52,16 @@ public class SendMessageOptions extends DateAndFlags {
                                              0, 2, 3, 6, 9, 14, 20, 27,
                                              35, 45, 57, 72, 92, 117, 147, 192
                                            };
+
+    /**
+     *  Reliability bits 9-10
+     *  @since 0.9.14
+     */
+    public enum Reliability { DEFAULT, BEST_EFFORT, GUARANTEED, UNDEFINED }
+
+    private static final int BEST_EFFORT_MASK = 0x0200;
+    private static final int GUARANTEED_MASK = 0x0400;
+    private static final int RELIABILITY_MASK = BEST_EFFORT_MASK | GUARANTEED_MASK;
 
     /** default true */
     public void setSendLeaseSet(boolean yes) {
@@ -140,5 +155,88 @@ public class SendMessageOptions extends DateAndFlags {
 
     private static int codeToVal(int code, int[] codes) {
         return codes[code];
+    }
+
+    /**
+     *  default Reliability.DEFAULT
+     *  @since 0.9.14
+     */
+    public void setReliability(Reliability r) {
+        _flags &= ~RELIABILITY_MASK;
+        switch (r) {
+          case BEST_EFFORT:
+            _flags |= BEST_EFFORT_MASK;
+            break;
+
+          case GUARANTEED:
+            _flags |= GUARANTEED_MASK;
+            break;
+
+          case UNDEFINED:
+            _flags |= RELIABILITY_MASK;
+            break;
+
+          case DEFAULT:
+          default:
+            break;
+        }
+    }
+
+    /**
+     *  default Reliability.DEFAULT
+     *  @since 0.9.14
+     */
+    public Reliability getReliability() {
+        return getReliability(_flags);
+    }
+
+    /**
+     *  default Reliability.DEFAULT
+     *  @since 0.9.14
+     */
+    public static Reliability getReliability(int flags) {
+        switch (flags & RELIABILITY_MASK) {
+          case BEST_EFFORT_MASK:
+            return Reliability.BEST_EFFORT;
+
+          case GUARANTEED_MASK:
+            return Reliability.GUARANTEED;
+
+          default:
+          case RELIABILITY_MASK:
+            return Reliability.UNDEFINED;
+
+          case 0:
+            return Reliability.DEFAULT;
+        }
+    }
+
+    /**
+     *  Overrides i2cp.gzip session option and size threshold
+     *  for this message only.
+     *
+     *  @since 0.9.36
+     */
+    public enum GzipOption { DEFAULT, GZIP_OFF, GZIP_ON }
+
+    /**
+     *  Overrides i2cp.gzip session option and size threshold
+     *  for this message only.
+     *
+     *  @return non-null, DEFAULT unless setGzip() was called
+     *  @since 0.9.36
+     */
+    public GzipOption getGzip() {
+        return _gzip;
+    }
+
+    /**
+     *  Overrides i2cp.gzip session option and size threshold
+     *  for this message only.
+     *
+     *  @since 0.9.36
+     */
+    public void setGzip(boolean yes) {
+        _gzip = yes? GzipOption.GZIP_ON : GzipOption.GZIP_OFF;
     }
 }

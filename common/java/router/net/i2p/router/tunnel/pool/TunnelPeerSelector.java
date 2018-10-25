@@ -1,5 +1,6 @@
 package net.i2p.router.tunnel.pool;
 
+import java.io.Serializable;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -11,15 +12,17 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.StringTokenizer;
 
-import net.i2p.I2PAppContext;
 import net.i2p.crypto.SHA256Generator;
+import net.i2p.crypto.SigType;
 import net.i2p.data.DataFormatException;
+import net.i2p.data.DataHelper;
 import net.i2p.data.Hash;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.router.Router;
 import net.i2p.router.RouterContext;
 import net.i2p.router.TunnelPoolSettings;
 import net.i2p.router.networkdb.kademlia.FloodfillNetworkDatabaseFacade;
+import net.i2p.router.transport.TransportUtil;
 import net.i2p.router.util.HashDistance;
 import net.i2p.util.Log;
 import net.i2p.util.VersionComparator;
@@ -28,13 +31,11 @@ import net.i2p.util.VersionComparator;
  * Coordinate the selection of peers to go into a tunnel for one particular 
  * pool.
  *
- * Todo: there's nothing non-static in here
  */
-public abstract class TunnelPeerSelector {
-    protected final RouterContext ctx;
+public abstract class TunnelPeerSelector extends ConnectChecker {
 
     protected TunnelPeerSelector(RouterContext context) {
-        ctx = context;
+        super(context);
     }
 
     /**
@@ -103,8 +104,9 @@ public abstract class TunnelPeerSelector {
         if (opts != null) {
             String peers = opts.getProperty("explicitPeers");
             if (peers == null)
-                peers = I2PAppContext.getGlobalContext().getProperty("explicitPeers");
-            if (peers != null)
+                peers = ctx.getProperty("explicitPeers");
+            // only one out of 4 times so we don't break completely if peer doesn't build one
+            if (peers != null && ctx.random().nextInt(4) == 0)
                 return true;
         }
         return false;
@@ -122,9 +124,8 @@ public abstract class TunnelPeerSelector {
             peers = opts.getProperty("explicitPeers");
         
         if (peers == null)
-            peers = I2PAppContext.getGlobalContext().getProperty("explicitPeers");
+            peers = ctx.getProperty("explicitPeers");
         
-        Log log = ctx.logManager().getLog(ClientPeerSelector.class);
         List<Hash> rv = new ArrayList<Hash>();
         StringTokenizer tok = new StringTokenizer(peers, ",");
         while (tok.hasMoreTokens()) {
@@ -198,7 +199,7 @@ public abstract class TunnelPeerSelector {
         //
         // Defaults changed to true for inbound only in filterUnreachable below.
 
-        Set<Hash> peers = new HashSet<Hash>(1);
+        Set<Hash> peers = new HashSet<Hash>(8);
         peers.addAll(ctx.profileOrganizer().selectPeersRecentlyRejecting());
         peers.addAll(ctx.tunnelManager().selectPeersInTooManyTunnels());
         // if (false && filterUnreachable(ctx, isInbound, isExploratory)) {
@@ -214,7 +215,6 @@ public abstract class TunnelPeerSelector {
         }
         if (filterSlow(isInbound, isExploratory)) {
             // NOTE: filterSlow always returns true
-            Log log = ctx.logManager().getLog(TunnelPeerSelector.class);
             char excl[] = getExcludeCaps(ctx);
             if (excl != null) {
                 FloodfillNetworkDatabaseFacade fac = (FloodfillNetworkDatabaseFacade)ctx.netDb();
@@ -222,7 +222,7 @@ public abstract class TunnelPeerSelector {
                 if (known != null) {
                     for (int i = 0; i < known.size(); i++) {
                         RouterInfo peer = known.get(i);
-                        boolean shouldExclude = shouldExclude(ctx, log, peer, excl);
+                        boolean shouldExclude = shouldExclude(peer, excl);
                         if (shouldExclude) {
                             peers.add(peer.getIdentity().calculateHash());
                             continue;
@@ -325,11 +325,118 @@ public abstract class TunnelPeerSelector {
         }
         return peers;
     }
+
+    /**
+     *  Are we IPv6 only?
+     *  @since 0.9.34
+     */
+    protected boolean isIPv6Only() {
+        // The setting is the same for both SSU and NTCP, so just take the SSU one
+        return TransportUtil.getIPv6Config(ctx, "SSU") == TransportUtil.IPv6Config.IPV6_ONLY;
+    }
+
+    /**
+     *  Should we allow as OBEP?
+     *  This just checks for IPv4 support.
+     *  Will return false for IPv6-only.
+     *  This is intended for tunnel candidates, where we already have
+     *  the RI. Will not force RI lookups.
+     *  Default true.
+     *
+     *  @since 0.9.34
+     */
+    private boolean allowAsOBEP(Hash h) {
+        RouterInfo ri = ctx.netDb().lookupRouterInfoLocally(h);
+        if (ri == null)
+            return true;
+        return canConnect(ri, ANY_V4);
+    }
+
+    /**
+     *  Should we allow as IBGW?
+     *  This just checks for IPv4 support.
+     *  Will return false for hidden or IPv6-only.
+     *  This is intended for tunnel candidates, where we already have
+     *  the RI. Will not force RI lookups.
+     *  Default true.
+     *
+     *  @since 0.9.34
+     */
+    private boolean allowAsIBGW(Hash h) {
+        RouterInfo ri = ctx.netDb().lookupRouterInfoLocally(h);
+        if (ri == null)
+            return true;
+        return canConnect(ANY_V4, ri);
+    }
+    
+    /** 
+     *  Pick peers that we want to avoid for the first OB hop or last IB hop.
+     *  There's several cases of importance:
+     *  <ol><li>Inbound and we are hidden -
+     *      Exclude all unless connected.
+     *      This is taken care of in ClientPeerSelector and TunnelPeerSelector selectPeers(), not here.
+     *
+     *  <li>We are IPv6-only.
+     *      Exclude all v4-only peers, unless connected
+     *      This is taken care of here.
+     *
+     *  <li>We have NTCP or SSU disabled.
+     *      Exclude all incompatible peers, unless connected
+     *      This is taken care of here.
+     *
+     *  <li>Minimum version check, if we are some brand-new sig type,
+     *      or are using some new tunnel build method.
+     *      Not currently used, but this is where to implement the checks if needed.
+     *      Make sure that ClientPeerSelector and TunnelPeerSelector selectPeers() call this when needed.
+     *  </ol>
+     *
+     *  Don't call this unless you need to.
+     *  See ClientPeerSelector and TunnelPeerSelector selectPeers().
+     *
+     *  @param isInbound
+     *  @return null if none
+     *  @since 0.9.17
+     */
+    protected Set<Hash> getClosestHopExclude(boolean isInbound) {
+        RouterInfo ri = ctx.router().getRouterInfo();
+        if (ri == null)
+            return null;
+
+        // we can skip this check now, uncomment if we have some new sigtype
+        //SigType type = ri.getIdentity().getSigType();
+        //if (type == SigType.DSA_SHA1)
+        //    return null;
+
+        int ourMask = isInbound ? getInboundMask(ri) : getOutboundMask(ri);
+        Set<Hash> connected = ctx.commSystem().getEstablished();
+        Set<Hash> rv = new HashSet<Hash>(256);
+        FloodfillNetworkDatabaseFacade fac = (FloodfillNetworkDatabaseFacade)ctx.netDb();
+        List<RouterInfo> known = fac.getKnownRouterData();
+        if (known != null) {
+            for (int i = 0; i < known.size(); i++) {
+                RouterInfo peer = known.get(i);
+                // we can skip this check now, uncomment if we have some breaking change
+                //String v = peer.getVersion();
+                // RI sigtypes added in 0.9.16
+                // SSU inbound connection bug fixed in 0.9.17, but it won't bid, so NTCP only,
+                // no need to check
+                //if (VersionComparator.comp(v, "0.9.16") < 0)
+                //    rv.add(peer.getIdentity().calculateHash());
+
+                Hash h = peer.getIdentity().calculateHash();
+                if (connected.contains(h))
+                    continue;
+                boolean canConnect = isInbound ? canConnect(peer, ourMask) : canConnect(ourMask, peer);
+                if (!canConnect)
+                    rv.add(h);
+            }
+        }
+        return rv;
+    }
     
     /** warning, this is also called by ProfileOrganizer.isSelectable() */
     public static boolean shouldExclude(RouterContext ctx, RouterInfo peer) {
-        Log log = ctx.logManager().getLog(TunnelPeerSelector.class);
-        return shouldExclude(ctx, log, peer, getExcludeCaps(ctx));
+        return shouldExclude(peer, getExcludeCaps(ctx));
     }
     
     private static char[] getExcludeCaps(RouterContext ctx) {
@@ -344,9 +451,9 @@ public abstract class TunnelPeerSelector {
     }
     
     /** 0.7.8 and earlier had major message corruption bugs */
-    private static final String MIN_VERSION = "0.7.9";
+    //private static final String MIN_VERSION = "0.7.9";
 
-    private static boolean shouldExclude(RouterContext ctx, Log log, RouterInfo peer, char excl[]) {
+    private static boolean shouldExclude(RouterInfo peer, char excl[]) {
         String cap = peer.getCapabilities();
         for (int j = 0; j < excl.length; j++) {
             if (cap.indexOf(excl[j]) >= 0) {
@@ -366,9 +473,10 @@ public abstract class TunnelPeerSelector {
         // so don't exclude it based on published capacity
 
         // minimum version check
-        String v = peer.getOption("router.version");
-        if (v == null || VersionComparator.comp(v, MIN_VERSION) < 0)
-            return true;
+        // we can skip this check now
+        //String v = peer.getVersion();
+        //if (VersionComparator.comp(v, MIN_VERSION) < 0)
+        //    return true;
 
         // uptime is always spoofed to 90m, so just remove all this
       /******
@@ -525,7 +633,7 @@ public abstract class TunnelPeerSelector {
      *  Now:
      *     d((H(l+h), h) - d(H(r+h), h)
      */
-    private static class HashComparator implements Comparator<Hash> {
+    private static class HashComparator implements Comparator<Hash>, Serializable {
         private final Hash _hash, tmp;
         private final byte[] data;
 
@@ -548,5 +656,76 @@ public abstract class TunnelPeerSelector {
             BigInteger rr = HashDistance.getDistance(_hash, tmp);
             return ll.compareTo(rr);
         }
+    }
+
+    /**
+     *  Connectivity check.
+     *  Check that each hop can connect to the next, including us.
+     *  Check that the OBEP is not IPv6-only, and the IBGW is
+     *  not hidden or IPv6-only.
+     *  Tells the profile manager to blame the hop, and returns false on failure.
+     *
+     *  @param tunnel ENDPOINT FIRST, GATEWAY LAST!!!!, length 2 or greater
+     *  @return ok
+     *  @since 0.9.34
+     */
+    protected boolean checkTunnel(boolean isInbound, List<Hash> tunnel) {
+        if (!checkTunnel(tunnel))
+            return false;
+        if (isInbound) {
+            Hash h = tunnel.get(tunnel.size() - 1);
+            if (!allowAsIBGW(h)) {
+                if (log.shouldWarn())
+                    log.warn("Picked IPv6-only or hidden peer for IBGW: " + h);
+                // treat as a timeout in the profile
+                // tunnelRejected() would set the last heard from time
+                ctx.profileManager().tunnelTimedOut(h);
+                return false;
+            }
+        } else {
+            Hash h = tunnel.get(0);
+            if (!allowAsOBEP(h)) {
+                if (log.shouldWarn())
+                    log.warn("Picked IPv6-only peer for OBEP: " + h);
+                // treat as a timeout in the profile
+                // tunnelRejected() would set the last heard from time
+                ctx.profileManager().tunnelTimedOut(h);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     *  Connectivity check.
+     *  Check that each hop can connect to the next, including us.
+     *
+     *  @param tunnel ENDPOINT FIRST, GATEWAY LAST!!!!
+     *  @return ok
+     *  @since 0.9.34
+     */
+    private boolean checkTunnel(List<Hash> tunnel) {
+        boolean rv = true;
+        for (int i = 0; i < tunnel.size() - 1; i++) {
+            // order is backwards!
+            Hash hf = tunnel.get(i+1);
+            Hash ht = tunnel.get(i);
+            if (!canConnect(hf, ht)) {
+                if (log.shouldWarn())
+                    log.warn("Connect check fail hop " + (i+1) + " to " + i +
+                             " in tunnel (EP<-GW): " + DataHelper.toString(tunnel));
+                // Blame them both
+                // treat as a timeout in the profile
+                // tunnelRejected() would set the last heard from time
+                Hash us = ctx.routerHash();
+                if (!hf.equals(us))
+                    ctx.profileManager().tunnelTimedOut(hf);
+                if (!ht.equals(us))
+                    ctx.profileManager().tunnelTimedOut(ht);
+                rv = false;
+                break;
+            }
+        }
+        return rv;
     }
 }

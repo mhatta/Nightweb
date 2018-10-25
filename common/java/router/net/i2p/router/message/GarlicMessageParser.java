@@ -10,6 +10,7 @@ package net.i2p.router.message;
 
 import java.util.Date;
 
+import net.i2p.I2PAppContext;
 import net.i2p.crypto.SessionKeyManager;
 import net.i2p.data.Certificate;
 import net.i2p.data.DataFormatException;
@@ -17,26 +18,35 @@ import net.i2p.data.DataHelper;
 import net.i2p.data.PrivateKey;
 import net.i2p.data.i2np.GarlicClove;
 import net.i2p.data.i2np.GarlicMessage;
-import net.i2p.router.RouterContext;
 import net.i2p.util.Log;
 
 /**
- * Read a GarlicMessage, decrypt it, and return the resulting CloveSet
- *
+ *  Read a GarlicMessage, decrypt it, and return the resulting CloveSet.
+ *  Thread-safe, does not contain any state.
+ *  Public as it's now in the RouterContext.
  */
-class GarlicMessageParser {
+public class GarlicMessageParser {
     private final Log _log;
-    private final RouterContext _context;
+    private final I2PAppContext _context;
     
-    public GarlicMessageParser(RouterContext context) { 
+    /**
+     *  Huge limit just to reduce chance of trouble. Typ. usage is 3.
+     *  As of 0.9.12. Was 255.
+     */
+    private static final int MAX_CLOVES = 32;
+
+    public GarlicMessageParser(I2PAppContext context) { 
         _context = context;
         _log = _context.logManager().getLog(GarlicMessageParser.class);
     }
     
-    /** @param skm use tags from this session key manager */
+    /**
+     *  @param skm use tags from this session key manager
+     *  @return null on error
+     */
     public CloveSet getGarlicCloves(GarlicMessage message, PrivateKey encryptionKey, SessionKeyManager skm) {
         byte encData[] = message.getData();
-        byte decrData[] = null;
+        byte decrData[];
         try {
             if (_log.shouldLog(Log.DEBUG))
                 _log.debug("Decrypting with private key " + encryptionKey);
@@ -44,6 +54,7 @@ class GarlicMessageParser {
         } catch (DataFormatException dfe) {
             if (_log.shouldLog(Log.WARN))
                 _log.warn("Error decrypting", dfe);
+            return null;
         }
         if (decrData == null) {
             // This is the usual error path and it's logged at WARN level in GarlicMessageReceiver
@@ -64,18 +75,19 @@ class GarlicMessageParser {
     private CloveSet readCloveSet(byte data[]) throws DataFormatException {
         int offset = 0;
         
-        CloveSet set = new CloveSet();
-
-        int numCloves = (int)DataHelper.fromLong(data, offset, 1);
+        int numCloves = data[offset] & 0xff;
         offset++;
         if (_log.shouldLog(Log.DEBUG))
             _log.debug("# cloves to read: " + numCloves);
+        if (numCloves <= 0 || numCloves > MAX_CLOVES)
+            throw new DataFormatException("bad clove count " + numCloves);
+        GarlicClove[] cloves = new GarlicClove[numCloves];
         for (int i = 0; i < numCloves; i++) {
             //if (_log.shouldLog(Log.DEBUG))
             //    _log.debug("Reading clove " + i);
                 GarlicClove clove = new GarlicClove(_context);
                 offset += clove.readBytes(data, offset);
-                set.addClove(clove);
+                cloves[i] = clove;
             //if (_log.shouldLog(Log.DEBUG))
             //    _log.debug("After reading clove " + i);
         }
@@ -85,11 +97,10 @@ class GarlicMessageParser {
         offset += cert.size();
         long msgId = DataHelper.fromLong(data, offset, 4);
         offset += 4;
-        Date expiration = DataHelper.fromDate(data, offset);
+        //Date expiration = DataHelper.fromDate(data, offset);
+        long expiration = DataHelper.fromLong(data, offset, 8);
 
-        set.setCertificate(cert);
-        set.setMessageId(msgId);
-        set.setExpiration(expiration.getTime());
+        CloveSet set = new CloveSet(cloves, cert, msgId, expiration);
         return set;
     }
 }

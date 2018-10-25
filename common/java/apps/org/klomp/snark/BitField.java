@@ -20,6 +20,8 @@
 
 package org.klomp.snark;
 
+import java.util.Arrays;
+
 
 /**
  * Container of a byte array representing set and unset bits.
@@ -46,7 +48,7 @@ public class BitField
    * as set by the given byte array. This will make a copy of the array.
    * Extra bytes will be ignored.
    *
-   * @exception ArrayOutOfBoundsException if give byte array is not large
+   * @throws IndexOutOfBoundsException if give byte array is not large
    * enough.
    */
   public BitField(byte[] bitfield, int size)
@@ -66,9 +68,11 @@ public class BitField
 
   /**
    * This returns the actual byte array used.  Changes to this array
-   * effect this BitField.  Note that some bits at the end of the byte
+   * affect this BitField.  Note that some bits at the end of the byte
    * array are supposed to be always unset if they represent bits
    * bigger then the size of the bitfield.
+   *
+   * Caller should synch on this and copy!
    */
   public byte[] getFieldBytes()
   {
@@ -88,7 +92,7 @@ public class BitField
   /**
    * Sets the given bit to true.
    *
-   * @exception IndexOutOfBoundsException if bit is smaller then zero
+   * @throws IndexOutOfBoundsException if bit is smaller then zero
    * bigger then size (inclusive).
    */
   public void set(int bit)
@@ -106,9 +110,40 @@ public class BitField
   }
 
   /**
+   * Sets the given bit to false.
+   *
+   * @throws IndexOutOfBoundsException if bit is smaller then zero
+   * bigger then size (inclusive).
+   * @since 0.9.22
+   */
+  public void clear(int bit)
+  {
+    if (bit < 0 || bit >= size)
+      throw new IndexOutOfBoundsException(Integer.toString(bit));
+    int index = bit/8;
+    int mask = 128 >> (bit % 8);
+    synchronized(this) {
+        if ((bitfield[index] & mask) != 0) {
+            count--;
+            bitfield[index] &= ~mask;
+        }
+    }
+  }
+
+  /**
+   * Sets all bits to true.
+   *
+   * @since 0.9.21
+   */
+  public void setAll() {
+      Arrays.fill(bitfield, (byte) 0xff);
+      count = size;
+  }
+
+  /**
    * Return true if the bit is set or false if it is not.
    *
-   * @exception IndexOutOfBoundsException if bit is smaller then zero
+   * @throws IndexOutOfBoundsException if bit is smaller then zero
    * bigger then size (inclusive).
    */
   public boolean get(int bit)
@@ -137,7 +172,24 @@ public class BitField
     return count >= size;
   }
 
-    @Override
+  /** @since 0.9.33 */
+  @Override
+  public int hashCode() {
+      return (count << 16) ^ size;
+  }
+
+  /** @since 0.9.33 */
+  @Override
+  public boolean equals(Object o) {
+      if (o == null || !(o instanceof BitField))
+          return false;
+      BitField bf = (BitField) o;
+      return count == bf.count() &&
+             size == bf.size() &&
+             Arrays.equals(bitfield, bf.getFieldBytes());
+  }
+
+  @Override
   public String toString()
   {
     // Not very efficient

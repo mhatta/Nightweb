@@ -4,10 +4,13 @@ import java.io.IOException;
 import java.io.Writer;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import net.i2p.data.Hash;
 import net.i2p.data.i2np.I2NPMessage;
+import net.i2p.data.i2np.I2NPMessageException;
 import net.i2p.data.i2np.I2NPMessageHandler;
 import net.i2p.router.CommSystemFacade;
 import net.i2p.router.JobImpl;
@@ -46,13 +49,30 @@ public class VMCommSystem extends CommSystemFacade {
         _context.statManager().createRequiredRateStat("transport.sendProcessingTime", "Time to process and send a message (ms)", "Transport", new long[] { 60*1000l, 10*60*1000l, 60*60*1000l, 24*60*60*1000l });
     }
     
+    public int countActivePeers() { return _commSystemFacades.size() - 1; }
+
+    public int countActiveSendPeers()  { return _commSystemFacades.size() - 1; }
+
+    public boolean isEstablished(Hash peer) { return _commSystemFacades.containsKey(peer); }
+
+    public Set<Hash> getEstablished() {
+        Set<Hash> rv;
+        synchronized (_commSystemFacades) {
+            rv = new HashSet<Hash>(_commSystemFacades.keySet());
+        }
+        Hash us = _context.routerHash();
+        if (us != null)
+            rv.remove(us);
+        return rv;
+    }
+
     /**
      * The router wants us to send the given message to the peer.  Do so, or fire 
      * off the failing job.
      */
     public void processMessage(OutNetMessage msg) {
         Hash peer = msg.getTarget().getIdentity().getHash();
-        VMCommSystem peerSys = (VMCommSystem)_commSystemFacades.get(peer);
+        VMCommSystem peerSys = _commSystemFacades.get(peer);
 
         long now = _context.clock().now();
         long sendTime = now - msg.getSendBegin();
@@ -66,7 +86,7 @@ public class VMCommSystem extends CommSystemFacade {
         } else {
             _context.jobQueue().addJob(msg.getOnSendJob());
             _context.profileManager().messageSent(msg.getTarget().getIdentity().getHash(), "vm", sendTime, msg.getMessageSize());
-            byte data[] = new byte[(int)msg.getMessageSize()];
+            byte data[] = new byte[msg.getMessageSize()];
             msg.getMessageData(data);
             _context.statManager().addRateData("transport.sendMessageSize", data.length, sendTime);
 
@@ -121,8 +141,8 @@ public class VMCommSystem extends CommSystemFacade {
                     ReceiveJob.this.getContext().statManager().addRateData("transport.receiveMessageLarge", 1, 1);
 
                 _ctx.inNetMessagePool().add(msg, null, _from);
-            } catch (Exception e) {
-                _log.error("wtf, error reading/formatting a VM message?", e);
+            } catch (I2NPMessageException e) {
+                _log.error("Error reading/formatting a VM message? Something is not right...", e);
             }
         }
         public String getName() { return "Receive Message"; }

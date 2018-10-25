@@ -29,6 +29,7 @@ public interface TunnelManagerFacade extends Service {
      * @param id the tunnelId as seen at the gateway
      * @deprecated unused
      */
+    @Deprecated
     TunnelInfo getTunnelInfo(TunnelId id);
 
     /**
@@ -146,6 +147,21 @@ public interface TunnelManagerFacade extends Service {
      *
      */
     public void buildTunnels(Destination client, ClientTunnelSettings settings);
+
+    /**
+     *  Add another destination to the same tunnels.
+     *  Must have same encryption key and a different signing key.
+     *  @throws IllegalArgumentException if not
+     *  @return success
+     *  @since 0.9.21
+     */
+    public boolean addAlias(Destination dest, ClientTunnelSettings settings, Destination existingClient);
+
+    /**
+     *  Remove another destination to the same tunnels.
+     *  @since 0.9.21
+     */
+    public void removeAlias(Destination dest);
     
     public TunnelPoolSettings getInboundSettings();
     public TunnelPoolSettings getOutboundSettings();
@@ -165,6 +181,18 @@ public interface TunnelManagerFacade extends Service {
     public TunnelPool getInboundExploratoryPool();
     /** for TunnelRenderer in router console */
     public TunnelPool getOutboundExploratoryPool();
+
+    /**
+     *  @return pool or null
+     *  @since 0.9.34
+     */
+    public TunnelPool getInboundPool(Hash client);
+
+    /**
+     *  @return pool or null
+     *  @since 0.9.34
+     */
+    public TunnelPool getOutboundPool(Hash client);
 
     /** @since 0.8.13 */
     public void fail(Hash peer);

@@ -11,32 +11,52 @@ package net.i2p.router.transport;
 import java.io.IOException;
 import java.io.Writer;
 import java.net.InetAddress;
+import java.net.Inet6Address;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 
+import net.i2p.crypto.SigType;
 import net.i2p.data.Hash;
-import net.i2p.data.RouterAddress;
-import net.i2p.data.RouterIdentity;
+import net.i2p.data.router.RouterAddress;
+import net.i2p.data.router.RouterIdentity;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.data.i2np.I2NPMessage;
-import net.i2p.router.CommSystemFacade;
+import net.i2p.router.CommSystemFacade.Status;
 import net.i2p.router.OutNetMessage;
 import net.i2p.router.RouterContext;
 import static net.i2p.router.transport.Transport.AddressSource.*;
 import net.i2p.router.transport.crypto.DHSessionKeyBuilder;
+import net.i2p.router.transport.crypto.X25519KeyFactory;
 import net.i2p.router.transport.ntcp.NTCPTransport;
 import net.i2p.router.transport.udp.UDPTransport;
 import net.i2p.util.Addresses;
 import net.i2p.util.Log;
 import net.i2p.util.SystemVersion;
 import net.i2p.util.Translate;
+import net.i2p.util.VersionComparator;
 
+/**
+ *  Keeps track of the enabled transports.
+ *  Starts UPnP.
+ *  Pluggable transport support incomplete.
+ *
+ *  Public only for a couple things in the console and Android.
+ *  To be made package private.
+ *  Everything external should go through CommSystemFacadeImpl.
+ *  Not a public API, not for external use.
+ *
+ */
 public class TransportManager implements TransportEventListener {
     private final Log _log;
     /**
@@ -44,9 +64,12 @@ public class TransportManager implements TransportEventListener {
      * If we want more than one transport with the same style we will have to change this.
      */
     private final Map<String, Transport> _transports;
+    /** locking: this */
+    private final Map<String, Transport> _pluggableTransports;
     private final RouterContext _context;
     private final UPnPManager _upnpManager;
     private final DHSessionKeyBuilder.PrecalcRunner _dhThread;
+    private final X25519KeyFactory _xdhThread;
 
     /** default true */
     public final static String PROP_ENABLE_UDP = "i2np.udp.enable";
@@ -54,34 +77,98 @@ public class TransportManager implements TransportEventListener {
     public final static String PROP_ENABLE_NTCP = "i2np.ntcp.enable";
     /** default true */
     public final static String PROP_ENABLE_UPNP = "i2np.upnp.enable";
+
+    private static final String PROP_NTCP2_ENABLE = "i2np.ntcp2.enable";
+    private static final boolean DEFAULT_NTCP2_ENABLE = true;
+
+    private static final String PROP_ADVANCED = "routerconsole.advanced";
     
+    /** not forever, since they may update */
+    private static final long SIGTYPE_BANLIST_DURATION = 36*60*60*1000L;
+
     public TransportManager(RouterContext context) {
         _context = context;
         _log = _context.logManager().getLog(TransportManager.class);
         _context.statManager().createRateStat("transport.banlistOnUnreachable", "Add a peer to the banlist since none of the transports can reach them", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
+        _context.statManager().createRateStat("transport.banlistOnUsupportedSigType", "Add a peer to the banlist since signature type is unsupported", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
         _context.statManager().createRateStat("transport.noBidsYetNotAllUnreachable", "Add a peer to the banlist since none of the transports can reach them", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
         _context.statManager().createRateStat("transport.bidFailBanlisted", "Could not attempt to bid on message, as they were banlisted", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
         _context.statManager().createRateStat("transport.bidFailSelf", "Could not attempt to bid on message, as it targeted ourselves", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
         _context.statManager().createRateStat("transport.bidFailNoTransports", "Could not attempt to bid on message, as none of the transports could attempt it", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
         _context.statManager().createRateStat("transport.bidFailAllTransports", "Could not attempt to bid on message, as all of the transports had failed", "Transport", new long[] { 60*1000, 10*60*1000, 60*60*1000 });
         _transports = new ConcurrentHashMap<String, Transport>(2);
+        _pluggableTransports = new HashMap<String, Transport>(2);
         if (_context.getBooleanPropertyDefaultTrue(PROP_ENABLE_UPNP))
             _upnpManager = new UPnPManager(context, this);
         else
             _upnpManager = null;
         _dhThread = new DHSessionKeyBuilder.PrecalcRunner(context);
+        boolean enableNTCP2 = isNTCPEnabled(context) &&
+                              context.getProperty(PROP_NTCP2_ENABLE, DEFAULT_NTCP2_ENABLE);
+        _xdhThread = enableNTCP2 ? new X25519KeyFactory(context) : null;
+    }
+
+    /**
+     *  Pluggable transports. Not for NTCP or SSU.
+     *
+     *  @since 0.9.16
+     */
+    synchronized void registerAndStart(Transport t) {
+        String style = t.getStyle();
+        if (style.equals(NTCPTransport.STYLE) || style.equals(UDPTransport.STYLE))
+            throw new IllegalArgumentException("Builtin transport");
+        if (_transports.containsKey(style) || _pluggableTransports.containsKey(style))
+            throw new IllegalStateException("Dup transport");
+        boolean shouldStart = !_transports.isEmpty();
+        _pluggableTransports.put(style, t);
+        addTransport(t);
+        t.setListener(this);
+        if (shouldStart) {
+            initializeAddress(t);
+            t.startListening();
+            _context.router().rebuildRouterInfo();
+        } // else will be started by configTransports() (unlikely)
+    }
+
+    /**
+     *  Pluggable transports. Not for NTCP or SSU.
+     *
+     *  @since 0.9.16
+     */
+    synchronized void stopAndUnregister(Transport t) {
+        String style = t.getStyle();
+        if (style.equals(NTCPTransport.STYLE) || style.equals(UDPTransport.STYLE))
+            throw new IllegalArgumentException("Builtin transport");
+        t.setListener(null);
+        _pluggableTransports.remove(style);
+        removeTransport(t);
+        t.stopListening();
+        _context.router().rebuildRouterInfo();
+    }
+
+    /**
+     *  Hook for pluggable transport creation.
+     *
+     *  @since 0.9.16
+     */
+    DHSessionKeyBuilder.Factory getDHFactory() {
+        return _dhThread;
     }
     
-    public void addTransport(Transport transport) {
+    private void addTransport(Transport transport) {
         if (transport == null) return;
-        _transports.put(transport.getStyle(), transport);
+        Transport old = _transports.put(transport.getStyle(), transport);
+        if (old != null && old != transport && _log.shouldLog(Log.WARN))
+            _log.warn("Replacing transport " + transport.getStyle());
         transport.setListener(this);
     }
     
-    public void removeTransport(Transport transport) {
+    private void removeTransport(Transport transport) {
         if (transport == null) return;
-        _transports.remove(transport.getStyle());
         transport.setListener(null);
+        Transport old = _transports.remove(transport.getStyle());
+        if (old != null && _log.shouldLog(Log.WARN))
+            _log.warn("Removing transport " + transport.getStyle());
     }
 
     private void configTransports() {
@@ -93,7 +180,7 @@ public class TransportManager implements TransportEventListener {
             initializeAddress(udp);
         }
         if (isNTCPEnabled(_context)) {
-            Transport ntcp = new NTCPTransport(_context, _dhThread);
+            Transport ntcp = new NTCPTransport(_context, _dhThread, _xdhThread);
             addTransport(ntcp);
             initializeAddress(ntcp);
             if (udp != null) {
@@ -101,7 +188,7 @@ public class TransportManager implements TransportEventListener {
                 // so that NTCP may bind early
                 int port = udp.getRequestedPort();
                 if (port > 0)
-                    ntcp.externalAddressReceived(SOURCE_CONFIG, null, port);
+                    ntcp.externalAddressReceived(SOURCE_CONFIG, (byte[]) null, port);
             }
         }
         if (_transports.isEmpty())
@@ -117,24 +204,84 @@ public class TransportManager implements TransportEventListener {
      *  It's the transport's job to ignore what it can't handle.
      */
     private void initializeAddress(Transport t) {
+        initializeAddress(Collections.singleton(t));
+    }
+    
+    /**
+     *  Notify all transports of ALL routable interface addresses, including IPv6.
+     *  It's the transport's job to ignore what it can't handle.
+     *  @since 0.9.34
+     */
+    void initializeAddress() {
+        initializeAddress(_transports.values());
+    }
+    
+    /**
+     *  Notify transports of ALL routable interface addresses, including IPv6.
+     *  It's the transport's job to ignore what it can't handle.
+     *  @since 0.9.34
+     */
+    private void initializeAddress(Collection<Transport> ts) {
+        if (ts.isEmpty())
+            return;
         Set<String> ipset = Addresses.getAddresses(false, true);  // non-local, include IPv6
+        //
+        // Avoid IPv6 temporary addresses if we have a non-temporary one
+        //
+        boolean hasNonTempV6Address = false;
+        List<InetAddress> addresses = new ArrayList<InetAddress>(4);
+        List<Inet6Address> tempV6Addresses = new ArrayList<Inet6Address>(4);
         for (String ips : ipset) {
             try {
-                InetAddress ia = InetAddress.getByName(ips);
-                byte[] ip = ia.getAddress();
-                t.externalAddressReceived(SOURCE_INTERFACE, ip, 0);
+                InetAddress addr = InetAddress.getByName(ips);
+                if (ips.contains(":") && (addr instanceof Inet6Address)) {
+                    Inet6Address v6addr = (Inet6Address) addr;
+                    // getAddresses(false, true) will not return deprecated addresses
+                    //if (Addresses.isDeprecated(v6addr)) {
+                    //    if (_log.shouldWarn())
+                    //        _log.warn("Not binding to deprecated temporary address " + bt);
+                    //    continue;
+                    //}
+                    if (Addresses.isTemporary(v6addr)) {
+                        // Save temporary addresses
+                        // we only use these if we don't have a non-temporary adress
+                        tempV6Addresses.add(v6addr);
+                        continue;
+                    }
+                    hasNonTempV6Address = true;
+                }
+                addresses.add(addr);
             } catch (UnknownHostException e) {
                 _log.error("UDP failed to bind to local address", e);
+            }
+        }
+        // we only use these if we don't have a non-temporary adress
+        if (!tempV6Addresses.isEmpty()) {
+            if (hasNonTempV6Address) {
+                if (_log.shouldWarn()) {
+                    for (Inet6Address addr : tempV6Addresses) {
+                        _log.warn("Not binding to temporary address " + addr.getHostAddress());
+                    }
+                }
+            } else {
+                addresses.addAll(tempV6Addresses);
+            }
+        }
+        for (Transport t : ts) {
+            for (InetAddress ia : addresses) {
+                byte[] ip = ia.getAddress();
+                t.externalAddressReceived(SOURCE_INTERFACE, ip, 0);
             }
         }
     }
 
     /**
      * Initialize from interfaces, and callback from UPnP or SSU.
-     * Tell all transports... but don't loop
+     * See CSFI.notifyReplaceAddress().
+     * Tell all transports... but don't loop.
      *
      */
-    public void externalAddressReceived(Transport.AddressSource source, byte[] ip, int port) {
+    void externalAddressReceived(Transport.AddressSource source, byte[] ip, int port) {
         for (Transport t : _transports.values()) {
             // don't loop
             if (!(source == SOURCE_SSU && t.getStyle().equals(UDPTransport.STYLE)))
@@ -143,18 +290,35 @@ public class TransportManager implements TransportEventListener {
     }
 
     /**
+     *  Remove all ipv4 or ipv6 addresses.
+     *  See CSFI.notifyRemoveAddress().
+     *  Tell all transports... but don't loop.
+     *
+     *  @since 0.9.20
+     */
+    void externalAddressRemoved(Transport.AddressSource source, boolean ipv6) {
+        for (Transport t : _transports.values()) {
+            // don't loop
+            if (!(source == SOURCE_SSU && t.getStyle().equals(UDPTransport.STYLE)))
+                t.externalAddressRemoved(source, ipv6);
+        }
+    }
+
+    /**
      * callback from UPnP
      *
      */
-    public void forwardPortStatus(String style, byte[] ip, int port, int externalPort, boolean success, String reason) {
+    void forwardPortStatus(String style, byte[] ip, int port, int externalPort, boolean success, String reason) {
         Transport t = getTransport(style);
         if (t != null)
             t.forwardPortStatus(ip, port, externalPort, success, reason);
     }
 
-    public synchronized void startListening() {
+    synchronized void startListening() {
         if (_dhThread.getState() == Thread.State.NEW)
             _dhThread.start();
+        if (_xdhThread != null && _xdhThread.getState() == Thread.State.NEW)
+            _xdhThread.start();
         // For now, only start UPnP if we have no publicly-routable addresses
         // so we don't open the listener ports to the world.
         // Maybe we need a config option to force on? Probably not.
@@ -173,7 +337,10 @@ public class TransportManager implements TransportEventListener {
         tp = getTransport(UDPTransport.STYLE);
         if (tp != null)
             tps.add(tp);
-        //for (Transport t : _transports.values()) {
+        // now add any others (pluggable)
+        for (Transport t : _pluggableTransports.values()) {
+             tps.add(t);
+        }
         for (Transport t : tps) {
             t.startListening();
             if (_log.shouldLog(Log.DEBUG))
@@ -185,7 +352,7 @@ public class TransportManager implements TransportEventListener {
         _context.router().rebuildRouterInfo();
     }
     
-    public synchronized void restart() {
+    synchronized void restart() {
         stopListening();
         try { Thread.sleep(5*1000); } catch (InterruptedException ie) {}
         startListening();
@@ -194,7 +361,7 @@ public class TransportManager implements TransportEventListener {
     /**
      *  Can be restarted.
      */
-    public synchronized void stopListening() {
+    synchronized void stopListening() {
         if (_upnpManager != null)
             _upnpManager.stop();
         for (Transport t : _transports.values()) {
@@ -208,20 +375,36 @@ public class TransportManager implements TransportEventListener {
      *  Cannot be restarted.
      *  @since 0.9
      */
-    public synchronized void shutdown() {
+    synchronized void shutdown() {
         stopListening();
         _dhThread.shutdown();
         Addresses.clearCaches();
         TransportImpl.clearCaches();
     }
     
-    public Transport getTransport(String style) {
+    Transport getTransport(String style) {
         return _transports.get(style);
     }
     
     int getTransportCount() { return _transports.size(); }
     
-    public int countActivePeers() { 
+    /**
+     *  @return SortedMap of style to Transport (a copy)
+     *  @since 0.9.31
+     */
+    SortedMap<String, Transport> getTransports() {
+        TreeMap<String, Transport> rv = new TreeMap<String, Transport>();
+        rv.putAll(_transports);
+        // TODO (also synch)
+        //rv.putAll(_pluggableTransports);
+        return rv;
+    }
+
+    /**
+     *  How many peers are we currently connected to, that we have
+     *  sent a message to or received a message from in the last five minutes.
+     */
+    int countActivePeers() { 
         int peers = 0;
         for (Transport t : _transports.values()) {
             peers += t.countActivePeers();
@@ -229,7 +412,12 @@ public class TransportManager implements TransportEventListener {
         return peers;
     }
     
-    public int countActiveSendPeers() { 
+    /**
+     *  How many peers are we currently connected to, that we have
+     *  sent a message to in the last minute.
+     *  Unused for anything, to be removed.
+     */
+    int countActiveSendPeers() { 
         int peers = 0;
         for (Transport t : _transports.values()) {
             peers += t.countActiveSendPeers();
@@ -243,7 +431,7 @@ public class TransportManager implements TransportEventListener {
       *
       * @param pct percent of limit 0-100
       */
-    public boolean haveOutboundCapacity(int pct) { 
+    boolean haveOutboundCapacity(int pct) { 
         for (Transport t : _transports.values()) {
             if (t.haveCapacity(pct))
                 return true;
@@ -256,7 +444,7 @@ public class TransportManager implements TransportEventListener {
       * Are all transports well below their outbound connection limit
       * Use for throttling in the router.
       */
-    public boolean haveHighOutboundCapacity() { 
+    boolean haveHighOutboundCapacity() { 
         if (_transports.isEmpty())
             return false;
         for (Transport t : _transports.values()) {
@@ -272,7 +460,7 @@ public class TransportManager implements TransportEventListener {
       *
       * @param pct percent of limit 0-100
       */
-    public boolean haveInboundCapacity(int pct) { 
+    boolean haveInboundCapacity(int pct) { 
         for (Transport t : _transports.values()) {
             if (t.hasCurrentAddress() && t.haveCapacity(pct))
                 return true;
@@ -283,9 +471,10 @@ public class TransportManager implements TransportEventListener {
     /**
      * Return our peer clock skews on all transports.
      * Vector composed of Long, each element representing a peer skew in seconds.
+     * A positive number means our clock is ahead of theirs.
      * Note: this method returns them in whimsical order.
      */
-    public Vector<Long> getClockSkews() {
+    Vector<Long> getClockSkews() {
         Vector<Long> skews = new Vector<Long>();
         for (Transport t : _transports.values()) {
             Vector<Long> tempSkews = t.getClockSkews();
@@ -297,46 +486,83 @@ public class TransportManager implements TransportEventListener {
         return skews;
     }
     
-    /** @return the best status of any transport */
-    public short getReachabilityStatus() { 
-        short rv = CommSystemFacade.STATUS_UNKNOWN;
+    /**
+     *  Previously returned short, now enum as of 0.9.20
+     *  @return the best status of any transport
+     */
+    Status getReachabilityStatus() { 
+        Status rv = Status.UNKNOWN;
         for (Transport t : _transports.values()) {
-            short s = t.getReachabilityStatus();
-            if (s < rv)
+            Status s = t.getReachabilityStatus();
+            if (s.getCode() < rv.getCode())
                 rv = s;
         }
         return rv;
     }
 
-    public void recheckReachability() { 
+    /**
+     * @deprecated unused
+     */
+    @Deprecated
+    void recheckReachability() { 
         for (Transport t : _transports.values())
             t.recheckReachability();
     }
 
-    public boolean isBacklogged(Hash dest) {
+    boolean isBacklogged(Hash peer) {
         for (Transport t : _transports.values()) {
-            if (t.isBacklogged(dest))
+            if (t.isBacklogged(peer))
                 return true;
         }
         return false;
     }    
     
-    public boolean isEstablished(Hash dest) {
+    boolean isEstablished(Hash peer) {
         for (Transport t : _transports.values()) {
-            if (t.isEstablished(dest))
+            if (t.isEstablished(peer))
                 return true;
         }
         return false;
     }    
     
     /**
+     *  @return a new set, may be modified
+     *  @since 0.9.34
+     */
+    public Set<Hash> getEstablished() {
+        // for efficiency. NTCP is modifiable, SSU isn't
+        Transport t = _transports.get("NTCP");
+        Set<Hash> rv;
+        if (t != null)
+            rv = t.getEstablished();
+        else
+            rv = new HashSet<Hash>(256);
+        t = _transports.get("SSU");
+        if (t != null)
+            rv.addAll(t.getEstablished());
+        return rv;
+    }
+    
+    /**
+     * Tell the transports that we may disconnect from this peer.
+     * This is advisory only.
+     *
+     * @since 0.9.24
+     */
+    void mayDisconnect(Hash peer) {
+        for (Transport t : _transports.values()) {
+             t.mayDisconnect(peer);
+        }
+    }
+    
+    /**
      * Was the peer UNreachable (outbound only) on any transport,
      * based on the last time we tried it for each transport?
      * This is NOT reset if the peer contacts us.
      */
-    public boolean wasUnreachable(Hash dest) {
+    boolean wasUnreachable(Hash peer) {
         for (Transport t : _transports.values()) {
-            if (!t.wasUnreachable(dest))
+            if (!t.wasUnreachable(peer))
                 return false;
         }
         return true;
@@ -353,14 +579,14 @@ public class TransportManager implements TransportEventListener {
      *
      * @return IPv4 or IPv6 or null
      */
-    public byte[] getIP(Hash dest) {
-        return TransportImpl.getIP(dest);
+    byte[] getIP(Hash peer) {
+        return TransportImpl.getIP(peer);
     }    
     
     /**
      *  This forces a rebuild
      */
-    public List<RouterAddress> getAddresses() {
+    List<RouterAddress> getAddresses() {
         List<RouterAddress> rv = new ArrayList<RouterAddress>(4);
         // do this first since SSU may force a NTCP change
         for (Transport t : _transports.values())
@@ -420,18 +646,19 @@ public class TransportManager implements TransportEventListener {
         return rv;
     }
     
-    public TransportBid getBid(OutNetMessage msg) {
+    TransportBid getBid(OutNetMessage msg) {
         List<TransportBid> bids = getBids(msg);
         if ( (bids == null) || (bids.isEmpty()) )
             return null;
         else
             return bids.get(0);
     }
-    public List<TransportBid> getBids(OutNetMessage msg) {
+
+    List<TransportBid> getBids(OutNetMessage msg) {
         if (msg == null)
             throw new IllegalArgumentException("Null message?  no bidding on a null outNetMessage!");
         if (_context.router().getRouterInfo().equals(msg.getTarget()))
-            throw new IllegalArgumentException("WTF, bids for a message bound to ourselves?");
+            throw new IllegalArgumentException("Bids for a message bound to ourselves?");
 
         List<TransportBid> rv = new ArrayList<TransportBid>(_transports.size());
         Set<String> failedTransports = msg.getFailedTransports();
@@ -457,7 +684,7 @@ public class TransportManager implements TransportEventListener {
         return rv;
     }
     
-    public TransportBid getNextBid(OutNetMessage msg) {
+    TransportBid getNextBid(OutNetMessage msg) {
         int unreachableTransports = 0;
         Hash peer = msg.getTarget().getIdentity().calculateHash();
         Set<String> failedTransports = msg.getFailedTransports();
@@ -496,10 +723,33 @@ public class TransportManager implements TransportEventListener {
             }
         }
         if (unreachableTransports >= _transports.size()) {
-            // Don't banlist if we aren't talking to anybody, as we may have a network connection issue
-            if (unreachableTransports >= _transports.size() && countActivePeers() > 0) {
-                _context.statManager().addRateData("transport.banlistOnUnreachable", msg.getLifetime(), msg.getLifetime());
-                _context.banlist().banlistRouter(peer, _x("Unreachable on any transport"));
+            if (msg.getTarget().getIdentity().getSigningPublicKey().getType() == null) {
+                // we don't support his crypto
+                _context.statManager().addRateData("transport.banlistOnUnsupportedSigType", 1);
+                _context.banlist().banlistRouterForever(peer, _x("Unsupported signature type"));
+            } else if (unreachableTransports >= _transports.size() && countActivePeers() > 0) {
+                // Don't banlist if we aren't talking to anybody, as we may have a network connection issue
+                // TODO if we are IPv6 only, ban for longer
+                boolean incompat = false;
+                RouterInfo us = _context.router().getRouterInfo();
+                if (us != null) {
+                    RouterIdentity id = us.getIdentity();
+                    if (id.getSigType() != SigType.DSA_SHA1) {
+                        String v = msg.getTarget().getVersion();
+                        // NTCP is earlier than SSU, use that one
+                        if (VersionComparator.comp(v, NTCPTransport.MIN_SIGTYPE_VERSION) < 0)
+                            incompat = true;
+                    }
+                }
+                if (incompat) {
+                    // they don't support our crypto
+                    _context.statManager().addRateData("transport.banlistOnUnsupportedSigType", 1);
+                    _context.banlist().banlistRouter(peer, _x("No support for our signature type"), null, null,
+                                                     _context.clock().now() + SIGTYPE_BANLIST_DURATION);
+                } else {
+                    _context.statManager().addRateData("transport.banlistOnUnreachable", msg.getLifetime(), msg.getLifetime());
+                    _context.banlist().banlistRouter(peer, _x("Unreachable on any transport"));
+                }
             }
         } else if (rv == null) {
             _context.statManager().addRateData("transport.noBidsYetNotAllUnreachable", unreachableTransports, msg.getLifetime());
@@ -526,13 +776,20 @@ public class TransportManager implements TransportEventListener {
                 _log.warn("Error receiving message", iae);
         }
     }
-    
+
+    /**
+     *  TransportEventListener
+     *  calls UPnPManager rescan() and update()
+     */
     public void transportAddressChanged() {
-        if (_upnpManager != null)
+        if (_upnpManager != null) {
+            _upnpManager.rescan();
+            // should really delay the following by 5 seconds?
             _upnpManager.update(getPorts());
+        }
     }
 
-    public List<String> getMostRecentErrorMessages() { 
+    List<String> getMostRecentErrorMessages() { 
         List<String> rv = new ArrayList<String>(16);
         for (Transport t : _transports.values()) {
             rv.addAll(t.getMostRecentErrorMessages());
@@ -540,80 +797,21 @@ public class TransportManager implements TransportEventListener {
         return rv;
     }
     
+    /**
+     *  As of 0.9.31, only outputs UPnP status
+     *
+     *  Warning - blocking, very slow, queries the active UPnP router,
+     *  will take many seconds if it has vanished.
+     */
     public void renderStatusHTML(Writer out, String urlBase, int sortFlags) throws IOException {
-        TreeMap<String, Transport> transports = new TreeMap<String, Transport>();
-        for (Transport t : _transports.values()) {
-            transports.put(t.getStyle(), t);
-        }
-        for (Transport t : transports.values()) {
-            t.renderStatusHTML(out, urlBase, sortFlags);
-        }
-        
-        if (!_transports.isEmpty()) {
-            out.write(getTransportsLegend());
-        }
-
-        StringBuilder buf = new StringBuilder(4*1024);
-        buf.append("<h3>").append(_("Router Transport Addresses")).append("</h3><pre>\n");
-        for (Transport t : _transports.values()) {
-            if (t.hasCurrentAddress()) {
-                for (RouterAddress ra : t.getCurrentAddresses()) {
-                    buf.append(ra.toString());
-                    buf.append("\n\n");
-                }
-            } else {
-                buf.append(_("{0} is used for outbound connections only", t.getStyle()));
-                buf.append("\n\n");
-            }
-        }
-        buf.append("</pre>\n");
-        out.write(buf.toString());
-        // newer androids crash w/ network on IO thread
-        if (_upnpManager != null && !SystemVersion.isAndroid())
+        if (SystemVersion.isAndroid()) {
+            // newer androids crash w/ network on IO thread
+        } else if (_upnpManager != null) {
             out.write(_upnpManager.renderStatusHTML());
-        out.write("</p>\n");
-        out.flush();
+        } else {
+            out.write("<h3 id=\"upnpstatus\"><a name=\"upnp\"></a>" + _t("UPnP is not enabled") + "</h3>\n");
+        }
     }
-
-
-    private final String getTransportsLegend() {
-        StringBuilder buf = new StringBuilder(1024);
-        buf.append("<h3 id=\"help\">").append(_("Help")).append("</h3><div class=\"configure\"><p>")
-           .append(_("Your transport connection limits are automatically set based on your configured bandwidth."))
-           .append('\n')
-           .append(_("To override these limits, add the settings i2np.ntcp.maxConnections=nnn and i2np.udp.maxConnections=nnn on the advanced configuration page."))
-           .append("</p></div>\n");
-        buf.append("<h3>").append(_("Definitions")).append("</h3><div class=\"configure\">" +
-                   "<p><b id=\"def.peer\">").append(_("Peer")).append("</b>: ").append(_("The remote peer, identified by router hash")).append("<br>\n" +
-                   "<b id=\"def.dir\">").append(_("Dir")).append("</b>: " +
-                   "<img alt=\"Inbound\" src=\"/themes/console/images/inbound.png\"> ").append(_("Inbound connection")).append("<br>\n" +
-                   "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;" +
-                   "<img alt=\"Outbound\" src=\"/themes/console/images/outbound.png\"> ").append(_("Outbound connection")).append("<br>\n" +
-                   "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;" +
-                   "<img src=\"/themes/console/images/inbound.png\" alt=\"V\" height=\"8\" width=\"12\"> ").append(_("They offered to introduce us (help other peers traverse our firewall)")).append("<br>\n" +
-                   "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;" +
-                   "<img src=\"/themes/console/images/outbound.png\" alt=\"^\" height=\"8\" width=\"12\"> ").append(_("We offered to introduce them (help other peers traverse their firewall)")).append("<br>\n" +
-                   "<b id=\"def.idle\">").append(_("Idle")).append("</b>: ").append(_("How long since a packet has been received / sent")).append("<br>\n" +
-                   "<b id=\"def.rate\">").append(_("In/Out")).append("</b>: ").append(_("The smoothed inbound / outbound transfer rate (KBytes per second)")).append("<br>\n" +
-                   "<b id=\"def.up\">").append(_("Up")).append("</b>: ").append(_("How long ago this connection was established")).append("<br>\n" +
-                   "<b id=\"def.skew\">").append(_("Skew")).append("</b>: ").append(_("The difference between the peer's clock and your own")).append("<br>\n" +
-                   "<b id=\"def.cwnd\">CWND</b>: ").append(_("The congestion window, which is how many bytes can be sent without an acknowledgement")).append(" / <br>\n" +
-                   "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ").append(_("The number of sent messages awaiting acknowledgement")).append(" /<br>\n" +
-                   "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ").append(_("The maximum number of concurrent messages to send")).append(" /<br>\n"+
-                   "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ").append(_("The number of pending sends which exceed congestion window")).append("<br>\n" +
-                   "<b id=\"def.ssthresh\">SST</b>: ").append(_("The slow start threshold")).append("<br>\n" +
-                   "<b id=\"def.rtt\">RTT</b>: ").append(_("The round trip time in milliseconds")).append("<br>\n" +
-                   //"<b id=\"def.dev\">").append(_("Dev")).append("</b>: ").append(_("The standard deviation of the round trip time in milliseconds")).append("<br>\n" +
-                   "<b id=\"def.rto\">RTO</b>: ").append(_("The retransmit timeout in milliseconds")).append("<br>\n" +
-                   "<b id=\"def.mtu\">MTU</b>: ").append(_("Current maximum send packet size / estimated maximum receive packet size (bytes)")).append("<br>\n" +
-                   "<b id=\"def.send\">").append(_("TX")).append("</b>: ").append(_("The total number of packets sent to the peer")).append("<br>\n" +
-                   "<b id=\"def.recv\">").append(_("RX")).append("</b>: ").append(_("The total number of packets received from the peer")).append("<br>\n" +
-                   "<b id=\"def.resent\">").append(_("Dup TX")).append("</b>: ").append(_("The total number of packets retransmitted to the peer")).append("<br>\n" +
-                   "<b id=\"def.dupRecv\">").append(_("Dup RX")).append("</b>: ").append(_("The total number of duplicate packets received from the peer")).append("</p>" +
-                   "</div>\n");
-        return buf.toString();
-    }
-
     
     /**
      *  Mark a string for extraction by xgettext and translation.
@@ -625,20 +823,12 @@ public class TransportManager implements TransportEventListener {
         return s;
     }
 
-
     private static final String BUNDLE_NAME = "net.i2p.router.web.messages";
 
     /**
      *  Translate
      */
-    private final String _(String s) {
+    private final String _t(String s) {
         return Translate.getString(s, _context, BUNDLE_NAME);
-    }
-
-    /**
-     *  Translate
-     */
-    private final String _(String s, Object o) {
-        return Translate.getString(s, o, _context, BUNDLE_NAME);
     }
 }

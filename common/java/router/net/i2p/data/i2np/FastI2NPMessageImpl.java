@@ -9,8 +9,6 @@ package net.i2p.data.i2np;
  */
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 
 import net.i2p.I2PAppContext;
 import net.i2p.data.Base64;
@@ -50,28 +48,10 @@ public abstract class FastI2NPMessageImpl extends I2NPMessageImpl {
     }
     
     /**
-     *  @deprecated unused
-     *  @throws UnsupportedOperationException
-     */
-    @Override
-    public void readBytes(InputStream in) throws DataFormatException, IOException {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     *  @deprecated unused
-     *  @throws UnsupportedOperationException
-     */
-    @Override
-    public int readBytes(InputStream in, int type, byte buffer[]) throws I2NPMessageException, IOException {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
      *  Ignore, but save, the checksum, to be used later if necessary.
      *
      *  @param maxLen read no more than this many bytes from data starting at offset, even if it is longer
-     *                This includes the type byte only if type < 0
+     *                This includes the type byte only if type &lt; 0
      *  @throws IllegalStateException if called twice, to protect saved checksum
      */
     @Override
@@ -85,7 +65,7 @@ public abstract class FastI2NPMessageImpl extends I2NPMessageImpl {
             throw new I2NPMessageException("Payload is too short " + maxLen);
         int cur = offset;
         if (type < 0) {
-            type = (int)DataHelper.fromLong(data, cur, 1);
+            type = data[cur] & 0xff;
             cur++;
         }
         _uniqueId = DataHelper.fromLong(data, cur, 4);
@@ -112,15 +92,6 @@ public abstract class FastI2NPMessageImpl extends I2NPMessageImpl {
         if (VERIFY_TEST && _log.shouldLog(Log.INFO))
             _log.info("Ignored c/s " + getClass().getSimpleName());
         return cur - offset;
-    }
-    
-    /**
-     *  @deprecated unused
-     *  @throws UnsupportedOperationException
-     */
-    @Override
-    public void writeBytes(OutputStream out) throws DataFormatException, IOException {
-        throw new UnsupportedOperationException();
     }
     
     /**
@@ -168,8 +139,7 @@ public abstract class FastI2NPMessageImpl extends I2NPMessageImpl {
             }
             int payloadLen = writtenLen - HEADER_LENGTH;
             int off = 0;
-            DataHelper.toLong(buffer, off, 1, getType());
-            off += 1;
+            buffer[off++] = (byte) getType();
             DataHelper.toLong(buffer, off, 4, _uniqueId);
             off += 4;
             DataHelper.toLong(buffer, off, DataHelper.DATE_LENGTH, _expiration);

@@ -8,6 +8,7 @@ package net.i2p.kademlia;
  *
  */
 
+import java.io.Serializable;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -71,9 +72,9 @@ public class KBucketSet<T extends SimpleDataStructure> {
      * Use the default trim strategy, which removes a random entry.
      * @param us the local identity (typically a SHA1Hash or Hash)
      *           The class must have a zero-argument constructor.
-     * @param max the Kademlia value "k", the max per bucket, k >= 4
+     * @param max the Kademlia value "k", the max per bucket, k &gt;= 4
      * @param b the Kademlia value "b", split buckets an extra 2**(b-1) times,
-     *           b > 0, use 1 for bittorrent, Kademlia paper recommends 5
+     *           b &gt; 0, use 1 for bittorrent, Kademlia paper recommends 5
      */
     public KBucketSet(I2PAppContext context, T us, int max, int b) {
         this(context, us, max, b, new RandomTrimmer<T>(context, max));
@@ -167,7 +168,7 @@ public class KBucketSet<T extends SimpleDataStructure> {
 
     /**
      *  No lock required.
-     *  FIXME will split the closest buckets too far if B > 1 and K < 2**B
+     *  FIXME will split the closest buckets too far if B &gt; 1 and K &lt; 2**B
      *  Won't ever really happen and if it does it still works.
      */
     private boolean shouldSplit(KBucket<T> b) {
@@ -431,12 +432,12 @@ public class KBucketSet<T extends SimpleDataStructure> {
         if (rv >= 0) {
              return rv;
         }
-        _log.error("Key does not fit in any bucket?! WTF!\nKey  : [" 
+        _log.error("Key does not fit in any bucket?!\nKey  : [" 
                    + DataHelper.toHexString(key.getData()) + "]" 
                    + "\nUs   : " + _us
                    + "\nDelta: ["
                    + DataHelper.toHexString(DataHelper.xor(_us.getData(), key.getData()))
-                   + "]", new Exception("WTF"));
+                   + "]", new Exception("???"));
         _log.error(toString());
         throw new IllegalStateException("pickBucket returned " + rv);
         //return -1;
@@ -587,7 +588,7 @@ public class KBucketSet<T extends SimpleDataStructure> {
         } else {
             // dont span main bucket boundaries with depth > 1
             if (fixed > 0)
-                throw new IllegalStateException("WTF " + bucket);
+                throw new IllegalStateException("??? " + bucket);
             BigInteger nonz;
             if (numNonZero <= 62) {
                 // add one to ensure nonzero
@@ -624,9 +625,10 @@ public class KBucketSet<T extends SimpleDataStructure> {
     
     /**
      *  Make a new SimpleDataStrucure from the data
-     *  @param data size <= SDS length, else throws IAE
+     *  @param data size &lt;= SDS length, else throws IAE
      *              Can be 1 bigger if top byte is zero
      */
+    @SuppressWarnings("unchecked")
     private T makeKey(byte[] data) {
         int len = _us.length();
         int dlen = data.length;
@@ -635,7 +637,7 @@ public class KBucketSet<T extends SimpleDataStructure> {
             throw new IllegalArgumentException("bad length " + dlen + " > " + len);
         T rv;
         try {
-            rv = (T) _us.getClass().newInstance();
+            rv = (T) _us.getClass().getDeclaredConstructor().newInstance();
         } catch (Exception e) {
             _log.error("fail", e);
             throw new RuntimeException(e);
@@ -728,13 +730,13 @@ public class KBucketSet<T extends SimpleDataStructure> {
         public void getEntries(SelectionCollector<T> collector) {
             throw new UnsupportedOperationException();
         }
-    
+
         public void clear() {}
 
         public boolean add(T peer) {
             throw new UnsupportedOperationException();
         }
-    
+
         public boolean remove(T peer) {
             return false;
         }
@@ -750,7 +752,7 @@ public class KBucketSet<T extends SimpleDataStructure> {
      *  For Collections.binarySearch.
      *  Returns equal for any overlap.
      */
-    private static class BucketComparator<T extends SimpleDataStructure> implements Comparator<KBucket<T>> {
+    private static class BucketComparator<T extends SimpleDataStructure> implements Comparator<KBucket<T>>, Serializable {
         public int compare(KBucket<T> l, KBucket<T> r) {
             if (l.getRangeEnd() < r.getRangeBegin())
                 return -1;
@@ -763,20 +765,22 @@ public class KBucketSet<T extends SimpleDataStructure> {
     @Override
     public String toString() {
         StringBuilder buf = new StringBuilder(1024);
-        buf.append("Bucket set rooted on: ").append(_us.toString())
+        buf.append("<div class=\"debug_container buckets\">");
+        buf.append("<hr><b>Bucket set rooted on:</b> ").append(_us.toString())
            .append(" K=").append(BUCKET_SIZE)
            .append(" B=").append(B_VALUE)
            .append(" with ").append(size())
-           .append(" keys in ").append(_buckets.size()).append(" buckets:\n");
+           .append(" keys in ").append(_buckets.size()).append(" buckets:<br>\n");
         getReadLock();
         try {
             int len = _buckets.size();
             for (int i = 0; i < len; i++) {
                 KBucket<T> b = _buckets.get(i);
-                buf.append("* Bucket ").append(i).append("/").append(len).append(": ");
-                buf.append(b.toString()).append("\n");
+                buf.append("<b>Bucket ").append(i).append("/").append(len).append(":</b> ");
+                buf.append(b.toString()).append("<br>\n");
             }
         } finally { releaseReadLock(); }
+        buf.append("</div>");
         return buf.toString();
     }
 }

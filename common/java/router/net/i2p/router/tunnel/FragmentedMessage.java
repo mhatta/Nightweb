@@ -57,8 +57,8 @@ class FragmentedMessage {
      */
     public boolean receive(int fragmentNum, byte payload[], int offset, int length, boolean isLast) {
         if (fragmentNum <= 0 || fragmentNum >= MAX_FRAGMENTS) {
-            if (_log.shouldLog(Log.ERROR))
-                _log.error("Fragment # == " + fragmentNum + " for messageId " + _messageId);
+            if (_log.shouldLog(Log.WARN))
+                _log.warn("Bad followon fragment # == " + fragmentNum + " for messageId " + _messageId);
             return false;
         }
         if (length <= 0 || length > MAX_FRAGMENT_SIZE) {
@@ -87,11 +87,6 @@ class FragmentedMessage {
         _lastReceived = _lastReceived || isLast;
         if (fragmentNum > _highFragmentNum)
             _highFragmentNum = fragmentNum;
-        if (isLast && fragmentNum <= 0) {
-            if (_log.shouldLog(Log.ERROR))
-                _log.error("hmm, isLast and fragmentNum=" + fragmentNum + " for message " + _messageId);
-            return false;
-        }
         return true;
     }
     
@@ -164,7 +159,7 @@ class FragmentedMessage {
     }
     public int getCompleteSize() {
         if (!_lastReceived) 
-            throw new IllegalStateException("wtf, don't get the completed size when we're not complete");
+            throw new IllegalStateException("don't get the completed size when we're not complete!");
         if (_releasedAfter > 0) {
              RuntimeException e = new RuntimeException("use after free in FragmentedMessage");
              _log.error("FM completeSize()", e);
@@ -175,7 +170,7 @@ class FragmentedMessage {
             ByteArray ba = _fragments[i];
             // NPE seen here, root cause unknown
             if (ba == null) 
-                throw new IllegalStateException("wtf, don't get the completed size when we're not complete - null fragment i=" + i + " of " + _highFragmentNum);
+                throw new IllegalStateException("don't get the completed size when we're not complete! - null fragment i=" + i + " of " + _highFragmentNum);
             size += ba.getValid();
         }
         return size;
@@ -279,6 +274,7 @@ class FragmentedMessage {
     }
 ****/
     
+    /** toString */
     @Override
     public String toString() {
         StringBuilder buf = new StringBuilder(128);

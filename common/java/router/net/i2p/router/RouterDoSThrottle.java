@@ -10,6 +10,7 @@ import net.i2p.data.Hash;
  *
  * @deprecated unused
  */
+@Deprecated
 class RouterDoSThrottle extends RouterThrottleImpl {
     public RouterDoSThrottle(RouterContext context) {
         super(context);
@@ -34,7 +35,7 @@ class RouterDoSThrottle extends RouterThrottleImpl {
             // same period, check for DoS
             int cnt = _currentLookupCount.incrementAndGet();
             if (cnt >= LOOKUP_THROTTLE_MAX) {
-                _context.statManager().addRateData("router.throttleNetDbDoS", cnt, 0);
+                _context.statManager().addRateData("router.throttleNetDbDoS", cnt);
                 int rand = _context.random().nextInt(cnt);
                 if (rand > LOOKUP_THROTTLE_MAX) {
                     return false;

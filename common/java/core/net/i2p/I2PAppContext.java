@@ -8,13 +8,11 @@ import java.util.Random;
 import java.util.Set;
 
 import net.i2p.app.ClientAppManager;
+import net.i2p.app.ClientAppManagerImpl;
 import net.i2p.client.naming.NamingService;
 import net.i2p.crypto.AESEngine;
 import net.i2p.crypto.CryptixAESEngine;
 import net.i2p.crypto.DSAEngine;
-import net.i2p.crypto.DummyDSAEngine;
-import net.i2p.crypto.DummyElGamalEngine;
-//import net.i2p.crypto.DummyPooledRandomSource;
 import net.i2p.crypto.ElGamalAESEngine;
 import net.i2p.crypto.ElGamalEngine;
 import net.i2p.crypto.HMAC256Generator;
@@ -22,12 +20,10 @@ import net.i2p.crypto.HMACGenerator;
 import net.i2p.crypto.KeyGenerator;
 import net.i2p.crypto.SHA256Generator;
 import net.i2p.crypto.SessionKeyManager;
-import net.i2p.crypto.TransientSessionKeyManager;
 import net.i2p.data.Base64;
 import net.i2p.data.RoutingKeyGenerator;
 import net.i2p.internal.InternalClientManager;
 import net.i2p.stat.StatManager;
-import net.i2p.update.UpdateManager;
 import net.i2p.util.Clock;
 import net.i2p.util.ConcurrentHashSet;
 import net.i2p.util.FileUtil;
@@ -35,7 +31,6 @@ import net.i2p.util.FortunaRandomSource;
 import net.i2p.util.I2PProperties;
 import net.i2p.util.KeyRing;
 import net.i2p.util.LogManager;
-//import net.i2p.util.PooledRandomSource;
 import net.i2p.util.PortMapper;
 import net.i2p.util.RandomSource;
 import net.i2p.util.SecureDirectory;
@@ -76,7 +71,7 @@ public class I2PAppContext {
     protected final I2PProperties _overrideProps;
     
     private StatManager _statManager;
-    private SessionKeyManager _sessionKeyManager;
+    protected SessionKeyManager _sessionKeyManager;
     private NamingService _namingService;
     private ElGamalEngine _elGamalEngine;
     private ElGamalAESEngine _elGamalAESEngine;
@@ -87,16 +82,16 @@ public class I2PAppContext {
     private SHA256Generator _sha;
     protected Clock _clock; // overridden in RouterContext
     private DSAEngine _dsa;
-    private RoutingKeyGenerator _routingKeyGenerator;
     private RandomSource _random;
     private KeyGenerator _keyGenerator;
     protected KeyRing _keyRing; // overridden in RouterContext
+    @SuppressWarnings("deprecation")
     private SimpleScheduler _simpleScheduler;
     private SimpleTimer _simpleTimer;
     private SimpleTimer2 _simpleTimer2;
     private final PortMapper _portMapper;
     private volatile boolean _statManagerInitialized;
-    private volatile boolean _sessionKeyManagerInitialized;
+    protected volatile boolean _sessionKeyManagerInitialized;
     private volatile boolean _namingServiceInitialized;
     private volatile boolean _elGamalEngineInitialized;
     private volatile boolean _elGamalAESEngineInitialized;
@@ -107,7 +102,6 @@ public class I2PAppContext {
     private volatile boolean _shaInitialized;
     protected volatile boolean _clockInitialized; // used in RouterContext
     private volatile boolean _dsaInitialized;
-    private volatile boolean _routingKeyGeneratorInitialized;
     private volatile boolean _randomInitialized;
     private volatile boolean _keyGeneratorInitialized;
     protected volatile boolean _keyRingInitialized; // used in RouterContext
@@ -123,11 +117,12 @@ public class I2PAppContext {
     private final File _appDir;
     private volatile File _tmpDir;
     private final Random _tmpDirRand = new Random();
+    private final ClientAppManager _appManager;
     // split up big lock on this to avoid deadlocks
     private final Object _lock1 = new Object(), _lock2 = new Object(), _lock3 = new Object(), _lock4 = new Object(),
                          _lock5 = new Object(), _lock6 = new Object(), _lock7 = new Object(), _lock8 = new Object(),
                          _lock9 = new Object(), _lock10 = new Object(), _lock11 = new Object(), _lock12 = new Object(),
-                         _lock13 = new Object(), _lock14 = new Object(), _lock15 = new Object(), _lock16 = new Object(),
+                         _lock13 = new Object(), _lock14 = new Object(), _lock16 = new Object(),
                          _lock17 = new Object(), _lock18 = new Object(), _lock19 = new Object(), _lock20 = new Object();
 
     /**
@@ -154,6 +149,26 @@ public class I2PAppContext {
         return _globalAppContext; 
     }
     
+    /**
+     * Sets the default context, unless there is one already.
+     * NOT a public API, for use by RouterContext only, NOT for external use.
+     *
+     * @param ctx context constructed with doInit = false
+     * @return success (false if previously set)
+     * @since 0.9.33
+     */
+    protected static boolean setGlobalContext(I2PAppContext ctx) {
+        synchronized (I2PAppContext.class) {
+            if (_globalAppContext == null) {
+                _globalAppContext = ctx;
+                return true;
+            }
+        }
+        System.out.println("Warning - New context not replacing old one, you now have a second one");
+        (new Exception("I did it")).printStackTrace();
+        return false;
+    }
+
     /**
      * Pull the default context, WITHOUT creating a new one.
      * Use this in static methods used early in router initialization,
@@ -195,16 +210,20 @@ public class I2PAppContext {
      * additional resources and threads, and may be the cause of logging
      * problems or hard-to-isolate bugs.
      *
+     * NOT a public API, for use by RouterContext only, NOT for external use.
+     *
      * @param doInit should this context be used as the global one (if necessary)?
      *               Will only apply if there is no global context now.
+     * @since protected since 0.9.33, NOT for external use
      */
-    private I2PAppContext(boolean doInit, Properties envProps) {
+    protected I2PAppContext(boolean doInit, Properties envProps) {
       synchronized (I2PAppContext.class) { 
         _overrideProps = new I2PProperties();
         if (envProps != null)
             _overrideProps.putAll(envProps);
         _shutdownTasks = new ConcurrentHashSet<Runnable>(32);
         _portMapper = new PortMapper(this);
+        _appManager = isRouterContext() ? null : new ClientAppManagerImpl(this);
     
    /*
     *  Directories. These are all set at instantiation and will not be changed by
@@ -303,24 +322,24 @@ public class I2PAppContext {
         } else {
             _appDir = _routerDir;
         }
-        /******
-        (new Exception("Initialized by")).printStackTrace();
-        System.err.println("Base directory:   " + _baseDir.getAbsolutePath());
-        System.err.println("Config directory: " + _configDir.getAbsolutePath());
-        System.err.println("Router directory: " + _routerDir.getAbsolutePath());
-        System.err.println("App directory:    " + _appDir.getAbsolutePath());
-        System.err.println("Log directory:    " + _logDir.getAbsolutePath());
-        System.err.println("PID directory:    " + _pidDir.getAbsolutePath());
-        System.err.println("Temp directory:   " + getTempDir().getAbsolutePath());
-        ******/
+        String isPortableStr = System.getProperty("i2p.dir.portableMode");
+        boolean isPortable = Boolean.parseBoolean(isPortableStr);
+        if (isPortable) {
+            // In portable we like debug information :)
+            //(new Exception("Initialized by")).printStackTrace();
+            System.err.println("Base directory:   " + _baseDir.getAbsolutePath());
+            System.err.println("Config directory: " + _configDir.getAbsolutePath());
+            System.err.println("Router directory: " + _routerDir.getAbsolutePath());
+            System.err.println("App directory:    " + _appDir.getAbsolutePath());
+            System.err.println("Log directory:    " + _logDir.getAbsolutePath());
+            System.err.println("PID directory:    " + _pidDir.getAbsolutePath());
+            System.err.println("Temp directory:   " + getTempDir().getAbsolutePath());
+        }
 
         if (doInit) {
-            if (_globalAppContext == null) {
-                _globalAppContext = this;
-            } else {
-                System.out.println("Warning - New context not replacing old one, you now have a second one");
-                (new Exception("I did it")).printStackTrace();
-            }
+            // Bad practice, sets a static field to this in constructor.
+            // doInit will be false when instantiated via Router.
+            setGlobalContext(this);
         }
       } // synch
     }
@@ -413,13 +432,15 @@ public class I2PAppContext {
                 } else if (_tmpDir.mkdir()) {
                     _tmpDir.deleteOnExit();
                 } else {
-                    System.err.println("Could not create temp dir " + _tmpDir.getAbsolutePath());
+                    System.err.println("WARNING: Could not create temp dir " + _tmpDir.getAbsolutePath());
                     _tmpDir = new SecureDirectory(_routerDir, "tmp");
-                    _tmpDir.mkdir();
+                    _tmpDir.mkdirs();
+                    if (!_tmpDir.exists())
+                        System.err.println("ERROR: Could not create temp dir " + _tmpDir.getAbsolutePath());
                 }
             }
+            return _tmpDir;
         }
-        return _tmpDir;
     }
 
     /** don't rely on deleteOnExit() */
@@ -441,8 +462,9 @@ public class I2PAppContext {
      */
     public String getProperty(String propName) {
         if (_overrideProps != null) {
-            if (_overrideProps.containsKey(propName))
-                return _overrideProps.getProperty(propName);
+            String rv = _overrideProps.getProperty(propName);
+            if (rv != null)
+                return rv;
         }
         return System.getProperty(propName);
     }
@@ -538,7 +560,7 @@ public class I2PAppContext {
      * @return set of Strings containing the names of defined system properties
      */
     @SuppressWarnings({ "unchecked", "rawtypes" })
-	public Set<String> getPropertyNames() { 
+    public Set<String> getPropertyNames() { 
         // clone to avoid ConcurrentModificationException
         Set<String> names = new HashSet<String>((Set<String>) (Set) ((Properties) System.getProperties().clone()).keySet()); // TODO-Java6: s/keySet()/stringPropertyNames()/
         if (_overrideProps != null)
@@ -599,6 +621,9 @@ public class I2PAppContext {
      * For client crypto within the router,
      * use RouterContext.clientManager.getClientSessionKeyManager(dest)
      *
+     * As of 0.9.15, this returns a dummy SessionKeyManager in I2PAppContext.
+     * The dummy SKM does NOT handle session tags.
+     * Overridden in RouterContext to return the full TransientSessionKeyManager.
      */
     public SessionKeyManager sessionKeyManager() { 
         if (!_sessionKeyManagerInitialized)
@@ -606,11 +631,11 @@ public class I2PAppContext {
         return _sessionKeyManager;
     }
 
-    private void initializeSessionKeyManager() {
+    protected void initializeSessionKeyManager() {
         synchronized (_lock3) {
             if (_sessionKeyManager == null) 
                 //_sessionKeyManager = new PersistentSessionKeyManager(this);
-                _sessionKeyManager = new TransientSessionKeyManager(this);
+                _sessionKeyManager = new SessionKeyManager(this);
             _sessionKeyManagerInitialized = true;
         }
     }
@@ -651,12 +676,8 @@ public class I2PAppContext {
 
     private void initializeElGamalEngine() {
         synchronized (_lock5) {
-            if (_elGamalEngine == null) {
-                if ("off".equals(getProperty("i2p.encryption", "on")))
-                    _elGamalEngine = new DummyElGamalEngine(this);
-                else
-                    _elGamalEngine = new ElGamalEngine(this);
-            }
+            if (_elGamalEngine == null)
+                _elGamalEngine = new ElGamalEngine(this);
             _elGamalEngineInitialized = true;
         }
     }
@@ -750,6 +771,7 @@ public class I2PAppContext {
     }
 
     /** @deprecated used only by syndie */
+    @Deprecated
     public HMAC256Generator hmac256() {
         if (!_hmac256Initialized)
             initializeHMAC256();
@@ -757,6 +779,7 @@ public class I2PAppContext {
     }
 
     /** @deprecated used only by syndie */
+    @Deprecated
     private void initializeHMAC256() {
         synchronized (_lock10) {
             if (_hmac256 == null) {
@@ -796,12 +819,8 @@ public class I2PAppContext {
 
     private void initializeDSA() {
         synchronized (_lock12) {
-            if (_dsa == null) {
-                if ("off".equals(getProperty("i2p.encryption", "on")))
-                    _dsa = new DummyDSAEngine(this);
-                else
-                    _dsa = new DSAEngine(this);
-            }
+            if (_dsa == null)
+                _dsa = new DSAEngine(this);
             _dsaInitialized = true;
         }
     }
@@ -849,19 +868,13 @@ public class I2PAppContext {
      * may want to test out how things react when peers don't agree on 
      * how to skew.
      *
+     * As of 0.9.16, returns null in I2PAppContext.
+     * You must be in RouterContext to get a generator.
+     *
+     * @return null always
      */
     public RoutingKeyGenerator routingKeyGenerator() {
-        if (!_routingKeyGeneratorInitialized)
-            initializeRoutingKeyGenerator();
-        return _routingKeyGenerator;
-    }
-
-    private void initializeRoutingKeyGenerator() {
-        synchronized (_lock15) {
-            if (_routingKeyGenerator == null)
-                _routingKeyGenerator = new RoutingKeyGenerator(this);
-            _routingKeyGeneratorInitialized = true;
-        }
+        return null;
     }
     
     /**
@@ -893,14 +906,8 @@ public class I2PAppContext {
 
     private void initializeRandom() {
         synchronized (_lock17) {
-            if (_random == null) {
-                //if (true)
-                    _random = new FortunaRandomSource(this);
-                //else if ("true".equals(getProperty("i2p.weakPRNG", "false")))
-                //    _random = new DummyPooledRandomSource(this);
-                //else
-                //    _random = new PooledRandomSource(this);
-            }
+            if (_random == null)
+                _random = new FortunaRandomSource(this);
             _randomInitialized = true;
         }
     }
@@ -961,13 +968,20 @@ public class I2PAppContext {
     /**
      * Use instead of SimpleScheduler.getInstance()
      * @since 0.9 to replace static instance in the class
+     * @deprecated in 0.9.20, use simpleTimer2()
      */
+    @Deprecated
+    @SuppressWarnings("deprecation")
     public SimpleScheduler simpleScheduler() {
         if (!_simpleSchedulerInitialized)
             initializeSimpleScheduler();
         return _simpleScheduler;
     }
 
+    /**
+     * @deprecated in 0.9.20
+     */
+    @Deprecated
     private void initializeSimpleScheduler() {
         synchronized (_lock18) {
             if (_simpleScheduler == null)
@@ -981,6 +995,7 @@ public class I2PAppContext {
      * @since 0.9 to replace static instance in the class
      * @deprecated use SimpleTimer2
      */
+    @Deprecated
     public SimpleTimer simpleTimer() {
         if (!_simpleTimerInitialized)
             initializeSimpleTimer();
@@ -990,6 +1005,7 @@ public class I2PAppContext {
     /**
      * @deprecated use SimpleTimer2
      */
+    @Deprecated
     private void initializeSimpleTimer() {
         synchronized (_lock19) {
             if (_simpleTimer == null)
@@ -1017,20 +1033,14 @@ public class I2PAppContext {
     }
 
     /**
-     *  The controller of router, plugin, and other updates.
-     *  @return always null in I2PAppContext, the update manager if in RouterContext and it is registered
-     *  @since 0.9.4
-     */
-    public UpdateManager updateManager() {
-        return null;
-    }
-
-    /**
-     *  The RouterAppManager in RouterContext, null always in I2PAppContext
-     *  @return null always
+     *  As of 0.9.30, returns non-null in I2PAppContext, null in RouterContext.
+     *  Prior to that, returned null always.
+     *  Overridden in RouterContext to return the RouterAppManager.
+     *
+     *  @return As of 0.9.30, returns non-null in I2PAppContext, null in RouterContext
      *  @since 0.9.11, in RouterContext since 0.9.4
      */
     public ClientAppManager clientAppManager() {
-        return null;
+        return _appManager;
     }
 }

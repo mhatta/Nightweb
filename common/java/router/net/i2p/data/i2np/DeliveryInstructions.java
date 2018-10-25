@@ -52,9 +52,10 @@ public class DeliveryInstructions extends DataStructureImpl {
     private final static int FLAG_MODE_TUNNEL = 3;
     
     /** @deprecated unused */
-    private final static long FLAG_ENCRYPTED = 128;
-    private final static long FLAG_MODE = 96;
-    private final static long FLAG_DELAY = 16;
+    @Deprecated
+    private final static int FLAG_ENCRYPTED = 128;
+    private final static int FLAG_MODE = 96;
+    private final static int FLAG_DELAY = 16;
     
     /**
      *  Immutable local instructions, no options
@@ -62,6 +63,19 @@ public class DeliveryInstructions extends DataStructureImpl {
      *  @since 0.9.9
      */
     public static final DeliveryInstructions LOCAL = new LocalInstructions();
+
+    /**
+     *  Returns immutable local instructions, or new
+     *
+     *  @since 0.9.20
+     */
+    public static DeliveryInstructions create(byte[] data, int offset) throws DataFormatException {
+        if (data[offset] == 0)
+            return LOCAL;
+        DeliveryInstructions rv = new DeliveryInstructions();
+        rv.readBytes(data, offset);
+        return rv;
+    }
 
     public DeliveryInstructions() {
         _deliveryMode = -1;
@@ -71,24 +85,28 @@ public class DeliveryInstructions extends DataStructureImpl {
      * For cloves only (not tunnels), default false, unused
      * @deprecated unused
      */
+    @Deprecated
     public boolean getEncrypted() { return /* _encrypted */ false; }
     
     /**
      * For cloves only (not tunnels), default false, unused
      * @deprecated unused
      */
+    @Deprecated
     public void setEncrypted(boolean encrypted) { /* _encrypted = encrypted; */ }
 
     /**
      * For cloves only (not tunnels), default null, unused
      * @deprecated unused
      */
+    @Deprecated
     public SessionKey getEncryptionKey() { return /* _encryptionKey */ null; }
 
     /**
      * For cloves only (not tunnels), default null, unused
      * @deprecated unused
      */
+    @Deprecated
     public void setEncryptionKey(SessionKey key) { /* _encryptionKey = key; */ }
 
     /** default -1 */
@@ -119,84 +137,42 @@ public class DeliveryInstructions extends DataStructureImpl {
      * default false, unused
      * @deprecated unused
      */
+    @Deprecated
     public boolean getDelayRequested() { return _delayRequested; }
     
     /**
      * default false, unused
      * @deprecated unused
      */
+    @Deprecated
     public void setDelayRequested(boolean req) { _delayRequested = req; }
     
     /**
      * default 0, unused
      * @deprecated unused
      */
+    @Deprecated
     public long getDelaySeconds() { return _delaySeconds; }
     
     /**
      * default 0, unused
      * @deprecated unused
      */
+    @Deprecated
     public void setDelaySeconds(long seconds) { _delaySeconds = seconds; }
-    
+
     /**
      * @deprecated unused
+     * @throws UnsupportedOperationException always
      */
-    public void readBytes(InputStream in) throws DataFormatException, IOException {
-        long flags = DataHelper.readLong(in, 1);
-        //if (_log.shouldLog(Log.DEBUG))
-        //    _log.debug("Read flags: " + flags + " mode: " +  flagMode(flags));
-        
-     /****
-        if (flagEncrypted(flags)) {
-            SessionKey k = new SessionKey();
-            k.readBytes(in);
-            setEncryptionKey(k);
-            setEncrypted(true);
-        } else {
-            setEncrypted(false);
-        }
-      ****/
-        
-        setDeliveryMode(flagMode(flags));
-        switch (flagMode(flags)) {
-            case FLAG_MODE_LOCAL:
-                break;
-            case FLAG_MODE_DESTINATION:
-                //Hash destHash = new Hash();
-                //destHash.readBytes(in);
-                Hash destHash = Hash.create(in);
-                setDestination(destHash);
-                break;
-            case FLAG_MODE_ROUTER:
-                //Hash routerHash = new Hash();
-                //routerHash.readBytes(in);
-                Hash routerHash = Hash.create(in);
-                setRouter(routerHash);
-                break;
-            case FLAG_MODE_TUNNEL:
-                //Hash tunnelRouterHash = new Hash();
-                //tunnelRouterHash.readBytes(in);
-                Hash tunnelRouterHash = Hash.create(in);
-                setRouter(tunnelRouterHash);
-                TunnelId id = new TunnelId();
-                id.readBytes(in);
-                setTunnelId(id);
-                break;
-        }
-        
-        if (flagDelay(flags)) {
-            long delay = DataHelper.readLong(in, 4);
-            setDelayRequested(true);
-            setDelaySeconds(delay);
-        } else {
-            setDelayRequested(false);
-        }
+    @Deprecated
+    public void readBytes(InputStream in) {
+        throw new UnsupportedOperationException();
     }
     
     public int readBytes(byte data[], int offset) throws DataFormatException {
         int cur = offset;
-        long flags = DataHelper.fromLong(data, cur, 1);
+        int flags = data[cur] & 0xff;
         cur++;
         //if (_log.shouldLog(Log.DEBUG))
         //    _log.debug("Read flags: " + flags + " mode: " +  flagMode(flags));
@@ -265,40 +241,38 @@ public class DeliveryInstructions extends DataStructureImpl {
 ****/
     
     /** high bits */
-    private static int flagMode(long flags) {
-        long v = flags & FLAG_MODE;
+    private static int flagMode(int flags) {
+        int v = flags & FLAG_MODE;
         v >>>= 5;
-        return (int)v;
+        return v;
     }
     
     /**  unused */
-    private static boolean flagDelay(long flags) {
+    private static boolean flagDelay(int flags) {
         return (0 != (flags & FLAG_DELAY));
     }
     
-    private long getFlags() {
-        long val = 0L;
+    private int getFlags() {
+        int val = 0;
      /****
         if (getEncrypted())
             val = val | FLAG_ENCRYPTED;
       ****/
-        long fmode = 0;
         switch (getDeliveryMode()) {
             case FLAG_MODE_LOCAL:
                 break;
             case FLAG_MODE_DESTINATION:
-                fmode = FLAG_MODE_DESTINATION << 5;
+                val = FLAG_MODE_DESTINATION << 5;
                 break;
             case FLAG_MODE_ROUTER:
-                fmode = FLAG_MODE_ROUTER << 5;
+                val = FLAG_MODE_ROUTER << 5;
                 break;
             case FLAG_MODE_TUNNEL:
-                fmode = FLAG_MODE_TUNNEL << 5;
+                val = FLAG_MODE_TUNNEL << 5;
                 break;
         }
-        val = val | fmode;
         if (getDelayRequested())
-            val = val | FLAG_DELAY;
+            val |= FLAG_DELAY;
         //if (_log.shouldLog(Log.DEBUG))
         //    _log.debug("getFlags() = " + val);
         return val;
@@ -338,17 +312,20 @@ public class DeliveryInstructions extends DataStructureImpl {
         return additionalSize;
     }
     
+/****
     private byte[] getAdditionalInfo() {
         int additionalSize = getAdditionalInfoSize();
         byte rv[] = new byte[additionalSize];
         int offset = 0;
         offset += getAdditionalInfo(rv, offset);
         if (offset != additionalSize)
-            //_log.log(Log.CRIT, "wtf, additionalSize = " + additionalSize + ", offset = " + offset);
-            throw new IllegalStateException("wtf, additionalSize = " + additionalSize + ", offset = " + offset);
+            //_log.log(Log.CRIT, "size mismatch, additionalSize = " + additionalSize + ", offset = " + offset);
+            throw new IllegalStateException("size mismatch, additionalSize = " + additionalSize + ", offset = " + offset);
         return rv;
     }
+****/
 
+    /** */
     private int getAdditionalInfo(byte rv[], int offset) {
         int origOffset = offset;
 
@@ -409,19 +386,11 @@ public class DeliveryInstructions extends DataStructureImpl {
     
     /**
      * @deprecated unused
+     * @throws UnsupportedOperationException always
      */
-    public void writeBytes(OutputStream out) throws DataFormatException, IOException {
-        if ( (_deliveryMode < 0) || (_deliveryMode > FLAG_MODE_TUNNEL) ) throw new DataFormatException("Invalid data: mode = " + _deliveryMode);
-        long flags = getFlags();
-        //if (_log.shouldLog(Log.DEBUG))
-        //    _log.debug("Write flags: " + flags + " mode: " + getDeliveryMode() 
-        //               + " =?= " + flagMode(flags));
-        byte additionalInfo[] = getAdditionalInfo();
-        DataHelper.writeLong(out, 1, flags);
-        if (additionalInfo != null) {
-            out.write(additionalInfo);
-            out.flush();
-        }
+    @Deprecated
+    public void writeBytes(OutputStream out) {
+        throw new UnsupportedOperationException();
     }
     
     /**
@@ -429,13 +398,12 @@ public class DeliveryInstructions extends DataStructureImpl {
      */
     public int writeBytes(byte target[], int offset) {
         if ( (_deliveryMode < 0) || (_deliveryMode > FLAG_MODE_TUNNEL) ) throw new IllegalStateException("Invalid data: mode = " + _deliveryMode);
-        long flags = getFlags();
+        int flags = getFlags();
         //if (_log.shouldLog(Log.DEBUG))
         //    _log.debug("Write flags: " + flags + " mode: " + getDeliveryMode() 
         //               + " =?= " + flagMode(flags));
         int origOffset = offset;
-        DataHelper.toLong(target, offset, 1, flags);
-        offset++;
+        target[offset++] = (byte) flags;
         offset += getAdditionalInfo(target, offset);
         return offset - origOffset;
     }
@@ -553,18 +521,8 @@ public class DeliveryInstructions extends DataStructureImpl {
         }
 
         @Override
-        public void readBytes(InputStream in) throws DataFormatException, IOException {
-            throw new RuntimeException("immutable");
-        }
-
-        @Override
         public int readBytes(byte data[], int offset) throws DataFormatException {
             throw new RuntimeException("immutable");
-        }
-
-        @Override
-        public void writeBytes(OutputStream out) throws DataFormatException, IOException {
-            out.write((byte) 0);
         }
 
         @Override

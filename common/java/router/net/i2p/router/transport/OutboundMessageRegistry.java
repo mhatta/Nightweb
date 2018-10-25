@@ -96,6 +96,7 @@ public class OutboundMessageRegistry {
      * @return non-null List of OutNetMessage describing messages that were waiting for 
      *         the payload
      */
+    @SuppressWarnings("unchecked")
     public List<OutNetMessage> getOriginalMessages(I2NPMessage message) {
         List<MessageSelector> matchedSelectors = null;
         List<MessageSelector> removedSelectors = null;
@@ -121,7 +122,7 @@ public class OutboundMessageRegistry {
             }  
         }
 
-        List<OutNetMessage> rv = null;
+        List<OutNetMessage> rv;
         if (matchedSelectors != null) {
             rv = new ArrayList<OutNetMessage>(matchedSelectors.size());
             for (MessageSelector sel : matchedSelectors) {
@@ -162,19 +163,22 @@ public class OutboundMessageRegistry {
     
     /**
      *  Registers a new, empty OutNetMessage, with the reply and timeout jobs specified.
+     *  The onTimeout job is called at replySelector.getExpiration() (if no reply is received by then)
      *
      *  @param replySelector non-null; The same selector may be used for more than one message.
-     *  @param onReply may be null
-     *  @param onTimeout Also called on failed send; may be null
-     *  @return an ONM where getMessage() is null. Use it to call unregisterPending() later if desired.
+     *  @param onReply non-null
+     *  @param onTimeout may be null
+     *  @return a dummy OutNetMessage where getMessage() is null. Use it to call unregisterPending() later if desired.
      */
-    public OutNetMessage registerPending(MessageSelector replySelector, ReplyJob onReply, Job onTimeout, int timeoutMs) {
-        OutNetMessage msg = new OutNetMessage(_context, _context.clock().now() + timeoutMs);
+    public OutNetMessage registerPending(MessageSelector replySelector, ReplyJob onReply, Job onTimeout) {
+        OutNetMessage msg = new OutNetMessage(_context);
         msg.setOnFailedReplyJob(onTimeout);
-        msg.setOnFailedSendJob(onTimeout);
         msg.setOnReplyJob(onReply);
         msg.setReplySelector(replySelector);
         registerPending(msg, true);
+        if (_log.shouldLog(Log.DEBUG))
+            _log.debug("Registered: " + replySelector + " with reply job " + onReply +
+                       " and timeout job " + onTimeout);
         return msg;
     }
     
@@ -190,11 +194,12 @@ public class OutboundMessageRegistry {
     /**
      *  @param allowEmpty is msg.getMessage() allowed to be null?
      */
+    @SuppressWarnings("unchecked")
     private void registerPending(OutNetMessage msg, boolean allowEmpty) {
         if ( (!allowEmpty) && (msg.getMessage() == null) )
-                throw new IllegalArgumentException("OutNetMessage doesn't contain an I2NPMessage? wtf");
+                throw new IllegalArgumentException("OutNetMessage doesn't contain an I2NPMessage? Impossible?");
         MessageSelector sel = msg.getReplySelector();
-        if (sel == null) throw new IllegalArgumentException("No reply selector?  wtf");
+        if (sel == null) throw new IllegalArgumentException("No reply selector? Impossible?");
 
         if (!_activeMessages.add(msg))
             return; // dont add dups
@@ -226,6 +231,7 @@ public class OutboundMessageRegistry {
     /**
      *  @param msg may be be null
      */
+    @SuppressWarnings("unchecked")
     public void unregisterPending(OutNetMessage msg) {
         if (msg == null) return;
         MessageSelector sel = msg.getReplySelector();
@@ -249,9 +255,11 @@ public class OutboundMessageRegistry {
     }
 
     /** @deprecated unused */
+    @Deprecated
     public void renderStatusHTML(Writer out) throws IOException {}
     
     private class CleanupTask extends SimpleTimer2.TimedEvent {
+        /** LOCKING: _selectors */
         private long _nextExpire;
 
         public CleanupTask() {
@@ -259,6 +267,7 @@ public class OutboundMessageRegistry {
             _nextExpire = -1;
         }
 
+        @SuppressWarnings("unchecked")
         public void timeReached() {
             long now = _context.clock().now();
             List<MessageSelector> removing = new ArrayList<MessageSelector>(8);
@@ -279,6 +288,7 @@ public class OutboundMessageRegistry {
                     }
                 }
             }
+            boolean log = _log.shouldLog(Log.DEBUG);
             if (!removing.isEmpty()) {
                 for (MessageSelector sel : removing) {
                     OutNetMessage msg = null;
@@ -297,27 +307,48 @@ public class OutboundMessageRegistry {
                         Job fail = msg.getOnFailedReplyJob();
                         if (fail != null)
                             _context.jobQueue().addJob(fail);
+                        if (log)
+                            _log.debug("Expired: " + sel + " with timeout job " + fail);
                     } else if (msgs != null) {
                         _activeMessages.removeAll(msgs);
                         for (OutNetMessage m : msgs) {
                             Job fail = m.getOnFailedReplyJob();
                             if (fail != null)
                                 _context.jobQueue().addJob(fail);
+                            if (log)
+                                _log.debug("Expired: " + sel + " with timeout job(s) " + fail);
                         }
+                    } else {
+                        if (log)
+                            _log.debug("Expired: " + sel + " with no known messages");
                     }
                 }
             }
 
-            if (_nextExpire <= now)
-                _nextExpire = now + 10*1000;
-            schedule(_nextExpire - now);
+            if (log) {
+                int e = removing.size();
+                int r;
+                synchronized(_selectors) {
+                    r = _selectors.size();
+                }
+                int a = _activeMessages.size();
+                if (r > 0 || e > 0 || a > 0)
+                    _log.debug("Expired: " + e + " remaining: " + r + " active: " + a);
+            }
+            synchronized(_selectors) {
+                if (_nextExpire <= now)
+                    _nextExpire = now + 10*1000;
+                schedule(_nextExpire - now);
+            }
         }
 
         public void scheduleExpiration(MessageSelector sel) {
             long now = _context.clock().now();
-            if ( (_nextExpire <= now) || (sel.getExpiration() < _nextExpire) ) {
-                _nextExpire = sel.getExpiration();
-                reschedule(_nextExpire - now);
+            synchronized(_selectors) {
+                if ( (_nextExpire <= now) || (sel.getExpiration() < _nextExpire) ) {
+                    _nextExpire = sel.getExpiration();
+                    reschedule(_nextExpire - now);
+                }
             }
         }
     }

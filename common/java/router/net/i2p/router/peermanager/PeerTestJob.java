@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Set;
 
 import net.i2p.data.Hash;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.data.TunnelId;
 import net.i2p.data.i2np.DatabaseStoreMessage;
 import net.i2p.data.i2np.DeliveryStatusMessage;
@@ -24,7 +24,8 @@ import net.i2p.util.Log;
  * selection to the peer manager and tests the peer by sending it a useless
  * database store message
  *
- * TODO - What's the point? Disable this? See also notes in PeerManager.selectPeers()
+ * TODO - What's the point? Disable this? See also notes in PeerManager.selectPeers().
+ * TODO - Use something besides sending the peer's RI to itself?
  */
 public class PeerTestJob extends JobImpl {
     private final Log _log;
@@ -82,6 +83,7 @@ public class PeerTestJob extends JobImpl {
     
     /**
      * Retrieve a group of 0 or more peers that we want to test. 
+     * Returned list will not include ourselves.
      *
      * @return set of RouterInfo structures
      */
@@ -110,12 +112,13 @@ public class PeerTestJob extends JobImpl {
     
     /**
      * Fire off the necessary jobs and messages to test the given peer
-     *
+     * The message is a store of the peer's RI to itself,
+     * with a reply token.
      */
     private void testPeer(RouterInfo peer) {
         TunnelInfo inTunnel = getInboundTunnelId(); 
         if (inTunnel == null) {
-            _log.warn("No tunnels to get peer test replies through!  wtf!");
+            _log.warn("No tunnels to get peer test replies through!");
             return;
         }
         TunnelId inTunnelId = inTunnel.getReceiveTunnelId(0);
@@ -123,19 +126,19 @@ public class PeerTestJob extends JobImpl {
         RouterInfo inGateway = getContext().netDb().lookupRouterInfoLocally(inTunnel.getPeer(0));
         if (inGateway == null) {
             if (_log.shouldLog(Log.WARN))
-                _log.warn("We can't find the gateway to our inbound tunnel?! wtf");
+                _log.warn("We can't find the gateway to our inbound tunnel?! Impossible?");
             return;
         }
 	
         int timeoutMs = getTestTimeout();
         long expiration = getContext().clock().now() + timeoutMs;
 
-        long nonce = getContext().random().nextLong(I2NPMessage.MAX_ID_VALUE);
+        long nonce = 1 + getContext().random().nextLong(I2NPMessage.MAX_ID_VALUE - 1);
         DatabaseStoreMessage msg = buildMessage(peer, inTunnelId, inGateway.getIdentity().getHash(), nonce, expiration);
 	
         TunnelInfo outTunnel = getOutboundTunnelId();
         if (outTunnel == null) {
-            _log.warn("No tunnels to send search out through!  wtf!");
+            _log.warn("No tunnels to send search out through! Something is wrong...");
             return;
         }
         
@@ -149,7 +152,7 @@ public class PeerTestJob extends JobImpl {
         PeerReplyFoundJob reply = new PeerReplyFoundJob(getContext(), peer, inTunnel, outTunnel);
         PeerReplyTimeoutJob timeoutJob = new PeerReplyTimeoutJob(getContext(), peer, inTunnel, outTunnel, sel);
         
-        getContext().messageRegistry().registerPending(sel, reply, timeoutJob, timeoutMs);
+        getContext().messageRegistry().registerPending(sel, reply, timeoutJob);
         getContext().tunnelDispatcher().dispatchOutbound(msg, outTunnelId, null, peer.getIdentity().getHash());
     }
     
@@ -172,7 +175,9 @@ public class PeerTestJob extends JobImpl {
     }
 
     /**
-     * Build a message to test the peer with 
+     * Build a message to test the peer with.
+     * The message is a store of the peer's RI to itself,
+     * with a reply token.
      */
     private DatabaseStoreMessage buildMessage(RouterInfo peer, TunnelId replyTunnel, Hash replyGateway, long nonce, long expiration) {
         DatabaseStoreMessage msg = new DatabaseStoreMessage(getContext());
@@ -210,9 +215,9 @@ public class PeerTestJob extends JobImpl {
                         if (_log.shouldLog(Log.WARN))
                             _log.warn("Took too long to get a reply from peer " + _peer.toBase64() 
                                       + ": " + (0-timeLeft) + "ms too slow");
-                        getContext().statManager().addRateData("peer.testTooSlow", 0-timeLeft, 0);
+                        getContext().statManager().addRateData("peer.testTooSlow", 0-timeLeft);
                     } else {
-                        getContext().statManager().addRateData("peer.testOK", getTestTimeout() - timeLeft, 0);
+                        getContext().statManager().addRateData("peer.testOK", getTestTimeout() - timeLeft);
                     }
                     _matchFound = true;
                     return true;
@@ -297,7 +302,7 @@ public class PeerTestJob extends JobImpl {
             
             // don't fail the tunnels, as the peer might just plain be down, or
             // otherwise overloaded
-            getContext().statManager().addRateData("peer.testTimeout", 1, 0);
+            getContext().statManager().addRateData("peer.testTimeout", 1);
         }
     }
 }

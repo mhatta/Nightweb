@@ -52,30 +52,105 @@ class Message
   
   // Not all fields are used for every message.
   // KEEP_ALIVE doesn't have a real wire representation
-  byte type;
+  final byte type;
 
   // Used for HAVE, REQUEST, PIECE and CANCEL messages.
+  // Also SUGGEST, REJECT, ALLOWED_FAST
   // low byte used for EXTENSION message
   // low two bytes used for PORT message
-  int piece;
+  final int piece;
 
   // Used for REQUEST, PIECE and CANCEL messages.
-  int begin;
-  int length;
+  // Also REJECT
+  final int begin;
+  final int length;
 
   // Used for PIECE and BITFIELD and EXTENSION messages
   byte[] data;
-  int off;
-  int len;
+  final int off;
+  final int len;
 
   // Used to do deferred fetch of data
-  DataLoader dataLoader;
+  private final DataLoader dataLoader;
 
   // now unused
   //SimpleTimer.TimedEvent expireEvent;
   
   private static final int BUFSIZE = PeerState.PARTSIZE;
   private static final ByteCache _cache = ByteCache.getInstance(16, BUFSIZE);
+
+  /**
+   * For types KEEP_ALIVE, CHOKE, UNCHOKE, INTERESTED, UNINTERESTED, HAVE_ALL, HAVE_NONE
+   * @since 0.9.32
+   */
+  Message(byte type) {
+      this(type, 0, 0, 0, null, 0, 0, null);
+  }
+
+  /**
+   * For types HAVE, PORT, SUGGEST, ALLOWED_FAST
+   * @since 0.9.32
+   */
+  Message(byte type, int piece) {
+      this(type, piece, 0, 0, null, 0, 0, null);
+  }
+
+  /**
+   * For types REQUEST, REJECT, CANCEL
+   * @since 0.9.32
+   */
+  Message(byte type, int piece, int begin, int length) {
+      this(type, piece, begin, length, null, 0, 0, null);
+  }
+
+  /**
+   * For type BITFIELD
+   * @since 0.9.32
+   */
+  Message(byte[] data) {
+      this(BITFIELD, 0, 0, 0, data, 0, data.length, null);
+  }
+
+  /**
+   * For type EXTENSION
+   * @since 0.9.32
+   */
+  Message(int id, byte[] data) {
+      this(EXTENSION, id, 0, 0, data, 0, data.length, null);
+  }
+
+  /**
+   * For type PIECE with deferred data
+   * @since 0.9.32
+   */
+  Message(int piece, int begin, int length, DataLoader loader) {
+      this(PIECE, piece, begin, length, null, 0, length, loader);
+  }
+
+  /**
+   * For type PIECE with data
+   * We don't use this anymore.
+   * @since 0.9.32
+   */
+/****
+  Message(int piece, int begin, int length, byte[] data) {
+      this(PIECE, piece, begin, length, data, 0, length, null);
+  }
+****/
+
+  /**
+   * @since 0.9.32
+   */
+  private Message(byte type, int piece, int begin, int length, byte[] data, int off, int len, DataLoader loader) {
+      this.type = type;
+      this.piece = piece;
+      this.begin = begin;
+      this.length = length;
+      this.data = data;
+      this.off = off;
+      this.len = len;
+      dataLoader = loader;
+  }
 
   /** Utility method for sending a message through a DataStream. */
   void sendMessage(DataOutputStream dos) throws IOException
@@ -104,22 +179,25 @@ class Message
     int datalen = 1;
 
     // piece is 4 bytes.
-    if (type == HAVE || type == REQUEST || type == PIECE || type == CANCEL)
+    if (type == HAVE || type == REQUEST || type == PIECE || type == CANCEL ||
+        type == SUGGEST || type == REJECT || type == ALLOWED_FAST)
       datalen += 4;
 
     // begin/offset is 4 bytes
-    if (type == REQUEST || type == PIECE || type == CANCEL)
+    if (type == REQUEST || type == PIECE || type == CANCEL ||
+        type == REJECT)
       datalen += 4;
 
     // length is 4 bytes
-    if (type == REQUEST || type == CANCEL)
+    if (type == REQUEST || type == CANCEL ||
+        type == REJECT)
       datalen += 4;
 
     // msg type is 1 byte
-    if (type == EXTENSION)
+    else if (type == EXTENSION)
       datalen += 1;
 
-    if (type == PORT)
+    else if (type == PORT)
       datalen += 2;
 
     // add length of data for piece or bitfield array.
@@ -131,21 +209,24 @@ class Message
     dos.writeByte(type & 0xFF);
 
     // Send additional info (piece number)
-    if (type == HAVE || type == REQUEST || type == PIECE || type == CANCEL)
+    if (type == HAVE || type == REQUEST || type == PIECE || type == CANCEL ||
+        type == SUGGEST || type == REJECT || type == ALLOWED_FAST)
       dos.writeInt(piece);
 
     // Send additional info (begin/offset)
-    if (type == REQUEST || type == PIECE || type == CANCEL)
+    if (type == REQUEST || type == PIECE || type == CANCEL ||
+        type == REJECT)
       dos.writeInt(begin);
 
     // Send additional info (length); for PIECE this is implicit.
-    if (type == REQUEST || type == CANCEL)
+    if (type == REQUEST || type == CANCEL ||
+        type == REJECT)
         dos.writeInt(length);
 
-    if (type == EXTENSION)
+    else if (type == EXTENSION)
         dos.writeByte((byte) piece & 0xff);
 
-    if (type == PORT)
+    else if (type == PORT)
         dos.writeShort(piece & 0xffff);
 
     // Send actual data
@@ -173,21 +254,32 @@ class Message
       case UNINTERESTED:
         return "UNINTERESTED";
       case HAVE:
-        return "HAVE(" + piece + ")";
+        return "HAVE(" + piece + ')';
       case BITFIELD:
         return "BITFIELD";
       case REQUEST:
-        return "REQUEST(" + piece + "," + begin + "," + length + ")";
+        return "REQUEST(" + piece + ',' + begin + ',' + length + ')';
       case PIECE:
-        return "PIECE(" + piece + "," + begin + "," + length + ")";
+        return "PIECE(" + piece + ',' + begin + ',' + length + ')';
       case CANCEL:
-        return "CANCEL(" + piece + "," + begin + "," + length + ")";
+        return "CANCEL(" + piece + ',' + begin + ',' + length + ')';
       case PORT:
-        return "PORT(" + piece + ")";
+        return "PORT(" + piece + ')';
       case EXTENSION:
         return "EXTENSION(" + piece + ',' + data.length + ')';
+      // fast extensions below here
+      case SUGGEST:
+        return "SUGGEST(" + piece + ')';
+      case HAVE_ALL:
+        return "HAVE_ALL";
+      case HAVE_NONE:
+        return "HAVE_NONE";
+      case REJECT:
+        return "REJECT(" + piece + ',' + begin + ',' + length + ')';
+      case ALLOWED_FAST:
+        return "ALLOWED_FAST(" + piece + ')';
       default:
-        return "<UNKNOWN>";
+        return "UNKNOWN (" + type + ')';
       }
   }
 }

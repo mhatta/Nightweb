@@ -12,7 +12,7 @@ import net.i2p.util.Log;
  * receive a packet and dispatch it correctly to the connection specified,
  * the server socket, or queue a reply RST packet.
  *<p>
- * I2PSession -> MessageHandler -> PacketHandler -> ConnectionPacketHandler -> MessageInputStream
+ * I2PSession -&gt; MessageHandler -&gt; PacketHandler -&gt; ConnectionPacketHandler -&gt; MessageInputStream
  */
 class PacketHandler {
     private final ConnectionManager _manager;
@@ -100,11 +100,12 @@ class PacketHandler {
         
         Connection con = (sendId > 0 ? _manager.getConnectionByInboundId(sendId) : null); 
         if (con != null) {
-            if (_log.shouldLog(Log.INFO))
+            if (_log.shouldDebug())
                 displayPacket(packet, "RECV", "wsize " + con.getOptions().getWindowSize() + " rto " + con.getOptions().getRTO());
             receiveKnownCon(con, packet);
         } else {
-            displayPacket(packet, "UNKN", null);
+            if (_log.shouldDebug())
+                displayPacket(packet, "UNKN", null);
             receiveUnknownCon(packet, sendId, queueIfNoConn);
         }
         // Don't log here, wait until we have the conn to make the dumps easier to follow
@@ -112,8 +113,9 @@ class PacketHandler {
     }
     
     private static final SimpleDateFormat _fmt = new SimpleDateFormat("HH:mm:ss.SSS");
+
+    /** logs to router log at debug level */
     void displayPacket(Packet packet, String prefix, String suffix) {
-        if (!_log.shouldLog(Log.INFO)) return;
         StringBuilder buf = new StringBuilder(256);
         synchronized (_fmt) {
             buf.append(_fmt.format(new Date()));
@@ -123,9 +125,8 @@ class PacketHandler {
         if (suffix != null)
             buf.append(" ").append(suffix);
         String str = buf.toString();
-        System.out.println(str);
-        if (_log.shouldLog(Log.DEBUG))
-            _log.debug(str);
+        //System.out.println(str);
+        _log.debug(str);
     }
     
     private void receiveKnownCon(Connection con, Packet packet) {
@@ -136,7 +137,7 @@ class PacketHandler {
         if (packet.isFlagSet(Packet.FLAG_ECHO)) {
             if (packet.getSendStreamId() > 0) {
                 if (con.getOptions().getAnswerPings())
-                    receivePing(packet);
+                    receivePing(con, packet);
                 else if (_log.shouldLog(Log.WARN))
                     _log.warn("Dropping Echo packet on existing con: " + packet);
             } else if (packet.getReceiveStreamId() > 0) {
@@ -207,7 +208,7 @@ class PacketHandler {
                     if (!con.getResetSent()) {
                         // someone is sending us a packet on the wrong stream 
                         // It isn't a SYN so it isn't likely to have a FROM to send a reset back to
-                        if (_log.shouldLog(Log.ERROR)) {
+                        if (_log.shouldLog(Log.WARN)) {
                             StringBuilder buf = new StringBuilder(512);
                             buf.append("Received a packet on the wrong stream: ");
                             buf.append(packet);
@@ -217,7 +218,7 @@ class PacketHandler {
                             for (Connection cur : _manager.listConnections()) {
                                 buf.append('\n').append(cur);
                             }
-                            _log.error(buf.toString(), new Exception("Wrong stream"));
+                            _log.warn(buf.toString(), new Exception("Wrong stream"));
                         }
                     }
                     packet.releasePayload();
@@ -230,6 +231,8 @@ class PacketHandler {
      *  This sends a reset back to the place this packet came from.
      *  If the packet has no 'optional from' or valid signature, this does nothing.
      *  This is not associated with a connection, so no con stats are updated.
+     *
+     *  @param packet incoming packet to be replied to
      */
     private void sendReset(Packet packet) {
         Destination from = packet.getOptionalFrom();
@@ -241,12 +244,15 @@ class PacketHandler {
                 _log.warn("Can't send reset after recv spoofed packet: " + packet);
             return;
         }
-        PacketLocal reply = new PacketLocal(_context, from);
+        PacketLocal reply = new PacketLocal(_context, from, packet.getSession());
         reply.setFlag(Packet.FLAG_RESET);
         reply.setFlag(Packet.FLAG_SIGNATURE_INCLUDED);
         reply.setSendStreamId(packet.getReceiveStreamId());
         reply.setReceiveStreamId(packet.getSendStreamId());
-        reply.setOptionalFrom(_manager.getSession().getMyDestination());
+        // TODO remove this someday, as of 0.9.20 we do not require it
+        reply.setOptionalFrom();
+        reply.setLocalPort(packet.getLocalPort());
+        reply.setRemotePort(packet.getRemotePort());
         // this just sends the packet - no retries or whatnot
         _manager.getPacketQueue().enqueue(reply);
     }
@@ -255,7 +261,7 @@ class PacketHandler {
         if (packet.isFlagSet(Packet.FLAG_ECHO)) {
             if (packet.getSendStreamId() > 0) {
                 if (_manager.answerPings())
-                    receivePing(packet);
+                    receivePing(null, packet);
                 else if (_log.shouldLog(Log.WARN))
                     _log.warn("Dropping Echo packet on unknown con: " + packet);
             } else if (packet.getReceiveStreamId() > 0) {
@@ -266,29 +272,32 @@ class PacketHandler {
             }
             packet.releasePayload();
         } else {
-            if (_log.shouldLog(Log.WARN) && !packet.isFlagSet(Packet.FLAG_SYNCHRONIZE))
-                _log.warn("Packet received on an unknown stream (and not an ECHO or SYN): " + packet);
+            // this happens a lot
+            if (_log.shouldLog(Log.INFO) && !packet.isFlagSet(Packet.FLAG_SYNCHRONIZE))
+                _log.info("Packet received on an unknown stream (and not an ECHO or SYN): " + packet);
             if (sendId <= 0) {
                 Connection con = _manager.getConnectionByOutboundId(packet.getReceiveStreamId());
                 if (con != null) {
                     if ( (con.getHighestAckedThrough() <= 5) && (packet.getSequenceNum() <= 5) ) {
-                        if (_log.shouldLog(Log.WARN))
-                            _log.warn("Received additional packet w/o SendStreamID after the syn on " + con + ": " + packet);
-                        receiveKnownCon(con, packet);
-                        return;
+                        if (_log.shouldLog(Log.INFO))
+                            _log.info("Received additional packet w/o SendStreamID after the syn on " + con + ": " + packet);
                     } else {
                         if (_log.shouldLog(Log.WARN))
                             _log.warn("hrmph, received while ack of syn was in flight on " + con + ": " + packet + " acked: " + con.getAckedPackets());
                         // allow unlimited packets without a SendStreamID for now
-                        receiveKnownCon(con, packet);
-                        return;
                     }
+                    receiveKnownCon(con, packet);
+                    return;
                 }
             } else {
                 // if it has a send ID, it's almost certainly for a recently removed connection.
-                if (_log.shouldLog(Log.WARN))
-                    _log.warn("Dropping pkt w/ send ID but no con found, recently disconnected? " + packet);
+                if (_log.shouldLog(Log.WARN)) {
+                    boolean recent = _manager.wasRecentlyClosed(packet.getSendStreamId());
+                    _log.warn("Dropping pkt w/ send ID but no con found, recently disconnected? " +
+                              recent + ' ' + packet);
+                }
                 // don't bother sending reset
+                // TODO send reset if recent && has data?
                 packet.releasePayload();
                 return;
             }
@@ -335,7 +344,10 @@ class PacketHandler {
         }
     }
     
-    private void receivePing(Packet packet) {
+    /**
+     *  @param con null if unknown
+     */
+    private void receivePing(Connection con, Packet packet) {
         boolean ok = packet.verifySignature(_context, packet.getOptionalFrom(), null);
         if (!ok) {
             if (_log.shouldLog(Log.WARN)) {
@@ -348,15 +360,12 @@ class PacketHandler {
                               + " sig=" + packet.getOptionalSignature().toBase64() + ")");
             }
         } else {
-            PacketLocal pong = new PacketLocal(_context, packet.getOptionalFrom());
-            pong.setFlag(Packet.FLAG_ECHO | Packet.FLAG_NO_ACK);
-            pong.setReceiveStreamId(packet.getSendStreamId());
-            _manager.getPacketQueue().enqueue(pong);
+            _manager.receivePing(con, packet);
         }
     }
     
     private void receivePong(Packet packet) {
-        _manager.receivePong(packet.getReceiveStreamId());
+        _manager.receivePong(packet.getReceiveStreamId(), packet.getPayload());
     }
     
     private static final boolean isValidMatch(long conStreamId, long packetStreamId) {

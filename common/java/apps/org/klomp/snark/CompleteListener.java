@@ -21,6 +21,9 @@
 
 package org.klomp.snark;
 
+import org.klomp.snark.comments.CommentSet;
+
+
 /**
  *  Callback for Snark events.
  *  @since 0.9.4 moved from Snark.java
@@ -54,7 +57,25 @@ public interface CompleteListener {
      */
     public void gotPiece(Snark snark);
 
-    // not really listeners but the easiest way to get back to an optional SnarkManager
+    /** not really listeners but the easiest way to get back to an optional SnarkManager */
     public long getSavedTorrentTime(Snark snark);
     public BitField getSavedTorrentBitField(Snark snark);
+    /**
+     * @since 0.9.15
+     */
+    public boolean getSavedPreserveNamesSetting(Snark snark);
+    /**
+     * @since 0.9.15
+     */
+    public long getSavedUploaded(Snark snark);
+
+    /**
+     * @since 0.9.31
+     */
+    public CommentSet getSavedComments(Snark snark);
+
+    /**
+     * @since 0.9.31
+     */
+    public void locked_saveComments(Snark snark, CommentSet comments);
 }

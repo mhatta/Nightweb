@@ -19,10 +19,13 @@ class InboundEndpointProcessor {
     private final TunnelCreatorConfig _config;
     private final IVValidator _validator;    
     
-    static final boolean USE_ENCRYPTION = HopProcessor.USE_ENCRYPTION;
+    //static final boolean USE_ENCRYPTION = HopProcessor.USE_ENCRYPTION;
     
-    /** @deprecated unused */
-    public InboundEndpointProcessor(RouterContext ctx, TunnelCreatorConfig cfg) {
+    /**
+     *  @deprecated used only by unit tests
+     */
+    @Deprecated
+    InboundEndpointProcessor(RouterContext ctx, TunnelCreatorConfig cfg) {
         this(ctx, cfg, DummyValidator.getInstance());
     }
 
@@ -67,7 +70,7 @@ class InboundEndpointProcessor {
         }
         
         // inbound endpoints and outbound gateways have to undo the crypto in the same way
-        if (USE_ENCRYPTION)
+        //if (USE_ENCRYPTION)
             decrypt(_context, _config, iv, orig, offset, length);
         
         SimpleByteCache.release(iv);

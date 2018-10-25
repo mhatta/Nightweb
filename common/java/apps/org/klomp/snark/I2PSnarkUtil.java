@@ -2,16 +2,19 @@ package org.klomp.snark;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.InputStream;
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+
 import net.i2p.I2PAppContext;
 import net.i2p.I2PException;
+import net.i2p.client.I2PClient;
 import net.i2p.client.I2PSession;
 import net.i2p.client.I2PSessionException;
 import net.i2p.client.streaming.I2PServerSocket;
@@ -35,8 +38,6 @@ import net.i2p.util.Translate;
 
 import org.klomp.snark.dht.DHT;
 import org.klomp.snark.dht.KRPC;
-import org.klomp.snark.dht.NodeInfo;
-import org.klomp.snark.dht.CustomQueryHandler;
 
 /**
  * I2P specific helpers for I2PSnark
@@ -64,23 +65,22 @@ public class I2PSnarkUtil {
     private int _maxConnections;
     private final File _tmpDir;
     private int _startupDelay;
+    private boolean _collapsePanels;
     private boolean _shouldUseOT;
     private boolean _shouldUseDHT;
+    private boolean _enableRatings, _enableComments;
+    private String _commentsName;
     private boolean _areFilesPublic;
     private List<String> _openTrackers;
     private DHT _dht;
-    private InputStream _myPrivateKeyStream;
-    private NodeInfo _myNodeInfo;
-    private CustomQueryHandler _customQueryHandler;
-    private Runnable _dhtInitCallback;
+    private long _startedTime;
 
     private static final int EEPGET_CONNECT_TIMEOUT = 45*1000;
     private static final int EEPGET_CONNECT_TIMEOUT_SHORT = 5*1000;
     public static final int DEFAULT_STARTUP_DELAY = 3;
+    public static final boolean DEFAULT_COLLAPSE_PANELS = true;
     public static final boolean DEFAULT_USE_OPENTRACKERS = true;
-    public static final String DEFAULT_OPENTRACKERS = "http://tracker.welterde.i2p/a";
-    public static final int DEFAULT_MAX_UP_BW = 8;  //KBps
-    public static final int MAX_CONNECTIONS = 16; // per torrent
+    public static final int MAX_CONNECTIONS = 24; // per torrent
     public static final String PROP_MAX_BW = "i2cp.outboundBytesPerSecond";
     public static final boolean DEFAULT_USE_DHT = true;
     public static final String EEPGET_USER_AGENT = "I2PSnark";
@@ -102,18 +102,20 @@ public class I2PSnarkUtil {
         setI2CPConfig("127.0.0.1", 7654, null);
         _banlist = new ConcurrentHashSet<Hash>();
         _maxUploaders = Snark.MAX_TOTAL_UPLOADERS;
-        _maxUpBW = DEFAULT_MAX_UP_BW;
+        _maxUpBW = SnarkManager.DEFAULT_MAX_UP_BW;
         _maxConnections = MAX_CONNECTIONS;
         _startupDelay = DEFAULT_STARTUP_DELAY;
         _shouldUseOT = DEFAULT_USE_OPENTRACKERS;
-        // FIXME split if default has more than one
-        _openTrackers = Collections.singletonList(DEFAULT_OPENTRACKERS);
+        _openTrackers = Collections.emptyList();
         _shouldUseDHT = DEFAULT_USE_DHT;
+        _collapsePanels = DEFAULT_COLLAPSE_PANELS;
+        _enableRatings = _enableComments = true;
+        _commentsName = "";
         // This is used for both announce replies and .torrent file downloads,
         // so it must be available even if not connected to I2CP.
         // so much for multiple instances
-        _tmpDir = new SecureDirectory(ctx.getTempDir(), baseName);
-        FileUtil.rmdir(_tmpDir, false);
+        _tmpDir = new SecureDirectory(ctx.getTempDir(), baseName + '-' + ctx.random().nextInt());
+        //FileUtil.rmdir(_tmpDir, false);
         _tmpDir.mkdirs();
     }
     
@@ -142,6 +144,7 @@ public class I2PSnarkUtil {
     
     public boolean configured() { return _configured; }
     
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public void setI2CPConfig(String i2cpHost, int i2cpPort, Map opts) {
         if (i2cpHost != null)
             _i2cpHost = i2cpHost;
@@ -188,19 +191,6 @@ public class I2PSnarkUtil {
 	_configured = true;
     }
     
-    public void setDHTNode(InputStream privateKeyStream, NodeInfo nodeInfo) {
-        _myPrivateKeyStream = privateKeyStream;
-        _myNodeInfo = nodeInfo;
-    }
-
-    public void setDHTCustomQueryHandler(CustomQueryHandler handler) {
-        _customQueryHandler = handler;
-    }
-
-    public void setDHTInitCallback(Runnable callback) {
-        _dhtInitCallback = callback;
-    }
-
     public String getI2CPHost() { return _i2cpHost; }
     public int getI2CPPort() { return _i2cpPort; }
     public Map<String, String> getI2CPOptions() { return _opts; }
@@ -275,19 +265,15 @@ public class I2PSnarkUtil {
                 opts.setProperty("i2p.streaming.disableRejectLogging", "true");
             if (opts.getProperty("i2p.streaming.answerPings") == null)
                 opts.setProperty("i2p.streaming.answerPings", "false");
-            if (_myPrivateKeyStream != null) {
-                _manager = I2PSocketManagerFactory.createManager(_myPrivateKeyStream, _i2cpHost, _i2cpPort, opts);
-            } else {
-                _manager = I2PSocketManagerFactory.createManager(_i2cpHost, _i2cpPort, opts);
-            }
+            if (opts.getProperty(I2PClient.PROP_SIGTYPE) == null)
+                opts.setProperty(I2PClient.PROP_SIGTYPE, "EdDSA_SHA512_Ed25519");
+            _manager = I2PSocketManagerFactory.createManager(_i2cpHost, _i2cpPort, opts);
+            if (_manager != null)
+                _startedTime = _context.clock().now();
             _connecting = false;
         }
-        if (_shouldUseDHT && _manager != null && _dht == null) {
-            _dht = new KRPC(_context, _baseName, _manager.getSession(), _myNodeInfo, _customQueryHandler);
-            if (_dhtInitCallback != null) {
-                _dhtInitCallback.run();
-            }
-        }
+        if (_shouldUseDHT && _manager != null && _dht == null)
+            _dht = new KRPC(_context, _baseName, _manager.getSession());
         return (_manager != null);
     }
     
@@ -319,6 +305,7 @@ public class I2PSnarkUtil {
             _dht.stop();
             _dht = null;
         }
+        _startedTime = 0;
         I2PSocketManager mgr = _manager;
         // FIXME this can cause race NPEs elsewhere
         _manager = null;
@@ -334,6 +321,16 @@ public class I2PSnarkUtil {
         _tmpDir.mkdirs();
     }
     
+    /**
+     * When did we connect to the network?
+     * For RPC
+     * @return 0 if not connected
+     * @since 0.9.30
+     */
+    public long getStartedTime() {
+        return _startedTime;
+    }
+
     /** connect to the given destination */
     I2PSocket connect(PeerID peer) throws IOException {
         I2PSocketManager mgr = _manager;
@@ -356,7 +353,7 @@ public class I2PSnarkUtil {
             return rv;
         } catch (I2PException ie) {
             _banlist.add(dest);
-            _context.simpleScheduler().addEvent(new Unbanlist(dest), 10*60*1000);
+            _context.simpleTimer2().addEvent(new Unbanlist(dest), 10*60*1000);
             IOException ioe = new IOException("Unable to reach the peer " + peer);
             ioe.initCause(ie);
             throw ioe;
@@ -381,12 +378,12 @@ public class I2PSnarkUtil {
     public File get(String url, boolean rewrite) { return get(url, rewrite, 0); }
 
     /**
-     * @param retries if < 0, set timeout to a few seconds
+     * @param retries if &lt; 0, set timeout to a few seconds
      */
     public File get(String url, int retries) { return get(url, true, retries); }
 
     /**
-     * @param retries if < 0, set timeout to a few seconds
+     * @param retries if &lt; 0, set timeout to a few seconds
      */
     public File get(String url, boolean rewrite, int retries) {
         if (_log.shouldLog(Log.DEBUG))
@@ -437,7 +434,7 @@ public class I2PSnarkUtil {
     
     /**
      * Fetch to memory
-     * @param retries if < 0, set timeout to a few seconds
+     * @param retries if &lt; 0, set timeout to a few seconds
      * @param initialSize buffer size
      * @param maxSize fails if greater
      * @return null on error
@@ -484,7 +481,7 @@ public class I2PSnarkUtil {
             return null;
     }
     
-    String getOurIPString() {
+    public String getOurIPString() {
         Destination dest = getMyDestination();
         if (dest != null)
             return dest.toBase64();
@@ -593,12 +590,12 @@ public class I2PSnarkUtil {
         return rv;
     }
     
-    /** @param ot non-null */
+    /** @param ot non-null list of announce URLs */
     public void setOpenTrackers(List<String> ot) { 
         _openTrackers = ot;
     }
 
-    /** List of open trackers to use as backups
+    /** List of open tracker announce URLs to use as backups
      *  @return non-null, possibly unmodifiable, empty if disabled
      */
     public List<String> getOpenTrackers() { 
@@ -608,7 +605,22 @@ public class I2PSnarkUtil {
     }
 
     /**
-     *  List of open trackers to use as backups even if disabled
+     *  Is this announce URL probably for an open tracker?
+     *
+     *  @since 0.9.17
+     */
+    public boolean isKnownOpenTracker(String url) { 
+        try {
+           URI u = new URI(url);
+           String host = u.getHost();
+           return host != null && SnarkManager.KNOWN_OPENTRACKERS.contains(host);
+        } catch (URISyntaxException use) {
+           return false;
+        }
+    }
+
+    /**
+     *  List of open tracker announce URLs to use as backups even if disabled
      *  @return non-null
      *  @since 0.9.4
      */
@@ -628,10 +640,7 @@ public class I2PSnarkUtil {
     public synchronized void setUseDHT(boolean yes) {
         _shouldUseDHT = yes;
         if (yes && _manager != null && _dht == null) {
-            _dht = new KRPC(_context, _baseName, _manager.getSession(), _myNodeInfo, _customQueryHandler);
-            if (_dhtInitCallback != null) {
-                _dhtInitCallback.run();
-            }
+            _dht = new KRPC(_context, _baseName, _manager.getSession());
         } else if (!yes && _dht != null) {
             _dht.stop();
             _dht = null;
@@ -641,6 +650,54 @@ public class I2PSnarkUtil {
     /** @since DHT */
     public boolean shouldUseDHT() {
         return _shouldUseDHT;
+    }
+
+    /** @since 0.9.31 */
+    public void setRatingsEnabled(boolean yes) {
+        _enableRatings = yes;
+    }
+
+    /** @since 0.9.31 */
+    public boolean ratingsEnabled() {
+        return _enableRatings;
+    }
+
+    /** @since 0.9.31 */
+    public void setCommentsEnabled(boolean yes) {
+        _enableComments = yes;
+    }
+
+    /** @since 0.9.31 */
+    public boolean commentsEnabled() {
+        return _enableComments;
+    }
+
+    /** @since 0.9.31 */
+    public void setCommentsName(String name) {
+        _commentsName = name;
+    }
+
+    /**
+     *  @return non-null, "" if none
+     *  @since 0.9.31
+     */
+    public String getCommentsName() {
+        return _commentsName == null ? "" : _commentsName;
+    }
+
+    /** @since 0.9.31 */
+    public boolean utCommentsEnabled() {
+        return _enableRatings || _enableComments;
+    }
+
+    /** @since 0.9.32 */
+    public boolean collapsePanels() {
+        return _collapsePanels;
+    }
+
+    /** @since 0.9.32 */
+    public void setCollapsePanels(boolean yes) {
+        _collapsePanels = yes;
     }
 
     /**
@@ -671,9 +728,9 @@ public class I2PSnarkUtil {
      *
      *  @param s string to be translated containing {0}
      *    The {0} will be replaced by the parameter.
-     *    Single quotes must be doubled, i.e. ' -> '' in the string.
+     *    Single quotes must be doubled, i.e. ' -&gt; '' in the string.
      *  @param o parameter, not translated.
-     *    To tranlslate parameter also, use _("foo {0} bar", _("baz"))
+     *    To translate parameter also, use _t("foo {0} bar", _t("baz"))
      *    Do not double the single quotes in the parameter.
      *    Use autoboxing to call with ints, longs, floats, etc.
      */

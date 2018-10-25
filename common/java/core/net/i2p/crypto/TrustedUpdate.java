@@ -23,7 +23,7 @@ import net.i2p.data.SigningPublicKey;
 import net.i2p.util.Log;
 import net.i2p.util.SecureFileOutputStream;
 import net.i2p.util.VersionComparator;
-import net.i2p.util.ZipFileComment;
+//import net.i2p.util.ZipFileComment;
 
 /**
  * <p>Handles DSA signing and verification of update files.
@@ -212,9 +212,9 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
     }
 
     /**
-     *  @since 0.9.8
+     *  @since 0.9.8, public since 0.9.14.1
      */
-    Map<SigningPublicKey, String> getKeys() {
+    public Map<SigningPublicKey, String> getKeys() {
         return Collections.unmodifiableMap(_trustedKeys);
     }
 
@@ -344,7 +344,11 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
             System.out.println("\r\nPrivate key written to: " + privateKeyFile);
             System.out.println("Public key written to: " + publicKeyFile);
             System.out.println("\r\nPublic key: " + signingPublicKey.toBase64() + "\r\n");
-        } catch (Exception e) {
+        } catch (IOException e) {
+            System.err.println("Error writing keys:");
+            e.printStackTrace();
+            return false;
+        } catch (DataFormatException e) {
             System.err.println("Error writing keys:");
             e.printStackTrace();
             return false;
@@ -489,7 +493,7 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
 
             return new String(data, "UTF-8");
         } catch (UnsupportedEncodingException uee) {
-            throw new RuntimeException("wtf, your JVM doesnt support utf-8? " + uee.getMessage());
+            throw new RuntimeException("your JVM doesnt support utf-8? " + uee.getMessage());
         } catch (IOException ioe) {
             return "";
         } finally {
@@ -528,7 +532,7 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
 
             return new String(data, "UTF-8");
         } catch (UnsupportedEncodingException uee) {
-            throw new RuntimeException("wtf, your JVM doesnt support utf-8? " + uee.getMessage());
+            throw new RuntimeException("your JVM doesnt support utf-8? " + uee.getMessage());
         } catch (IOException ioe) {
             return "";
         } finally {
@@ -607,9 +611,10 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
      *
      * @since 0.8.8
      */
+    @SuppressWarnings("deprecation")
     private boolean verifyVersionMatch(File signedFile) {
         try {
-             String zipComment = ZipFileComment.getComment(signedFile, VERSION_BYTES, HEADER_BYTES);
+             String zipComment = net.i2p.util.ZipFileComment.getComment(signedFile, VERSION_BYTES, HEADER_BYTES);
              return zipComment.equals(_newVersion);
         } catch (IOException ioe) {}
         return false;
@@ -638,12 +643,7 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
             fileOutputStream = new FileOutputStream(outputFile);
 
             DataHelper.skip(fileInputStream, HEADER_BYTES);
-
-            byte[] buffer = new byte[16*1024];
-            int bytesRead = 0;
-
-            while ( (bytesRead = fileInputStream.read(buffer)) != -1) 
-                fileOutputStream.write(buffer, 0, bytesRead);
+            DataHelper.copy(fileInputStream, fileOutputStream);
         } catch (IOException ioe) {
             // probably permissions or disk full, so bring the message out to the console
             return "Error copying update: " + ioe;
@@ -742,7 +742,7 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
         try {
             versionRawBytes = version.getBytes("UTF-8");
         } catch (UnsupportedEncodingException e) {
-            throw new RuntimeException("wtf, your JVM doesnt support utf-8? " + e.getMessage());
+            throw new RuntimeException("your JVM doesnt support utf-8? " + e.getMessage());
         }
 
         System.arraycopy(versionRawBytes, 0, versionHeader, 0, versionRawBytes.length);
@@ -758,19 +758,14 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
             bytesToSignInputStream = new SequenceInputStream(versionHeaderInputStream, fileInputStream);
             signature = _context.dsa().sign(bytesToSignInputStream, signingPrivateKey);
 
-        } catch (Exception e) {
+        } catch (IOException e) {
             if (_log.shouldLog(Log.ERROR))
                 _log.error("Error signing", e);
 
             return null;
         } finally {
-            if (bytesToSignInputStream != null)
-                try {
-                    bytesToSignInputStream.close();
-                } catch (IOException ioe) {
-                }
-
-            fileInputStream = null;
+            if (bytesToSignInputStream != null) try { bytesToSignInputStream.close(); } catch (IOException ioe) {}
+            if (fileInputStream != null) try { fileInputStream.close(); } catch (IOException ioe) {}
         }
 
         FileOutputStream fileOutputStream = null;
@@ -780,10 +775,7 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
             fileOutputStream.write(signature.getData());
             fileOutputStream.write(versionHeader);
             fileInputStream = new FileInputStream(inputFile);
-            byte[] buffer = new byte[1024];
-            int bytesRead = 0;
-            while ( (bytesRead = fileInputStream.read(buffer)) != -1) 
-                fileOutputStream.write(buffer, 0, bytesRead);
+            DataHelper.copy(fileInputStream, fileOutputStream);
             fileOutputStream.close();
         } catch (IOException ioe) {
             if (_log.shouldLog(Log.WARN))
@@ -837,10 +829,11 @@ riCe6OlAEiNpcc6mMyIYYWFICbrDFTrDR3wXqwc/Jkcx6L5VVWoagpSzbo3yGhc=
      * @since 0.7.12
      */
     public String verifyAndGetSigner(File signedFile) {
-        for (SigningPublicKey signingPublicKey : _trustedKeys.keySet()) {
+        for (Map.Entry<SigningPublicKey, String> e : _trustedKeys.entrySet()) {
+            SigningPublicKey signingPublicKey = e.getKey();
             boolean isValidSignature = verify(signedFile, signingPublicKey);
             if (isValidSignature)
-                return _trustedKeys.get(signingPublicKey);
+                return e.getValue();
         }
         return null;
     }

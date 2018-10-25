@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Arrays;
 import java.util.Map;
 
 import net.i2p.I2PAppContext;
@@ -24,7 +25,7 @@ import net.i2p.util.SystemVersion;
  *  Following is sample usage:
  *  <pre>
 
-    private static final SDSCache<Foo> _cache = new SDSCache(Foo.class, LENGTH, 1024);
+    private static final SDSCache&lt;Foo&gt; _cache = new SDSCache(Foo.class, LENGTH, 1024);
 
     public static Foo create(byte[] data) {
         return _cache.get(data);
@@ -45,7 +46,6 @@ import net.i2p.util.SystemVersion;
 public class SDSCache<V extends SimpleDataStructure> {
     //private static final Log _log = I2PAppContext.getGlobalContext().logManager().getLog(SDSCache.class);
 
-    private static final Class[] conArg = new Class[] { byte[].class };
     private static final double MIN_FACTOR = 0.20;
     private static final double MAX_FACTOR = 5.0;
     private static final double FACTOR;
@@ -73,7 +73,7 @@ public class SDSCache<V extends SimpleDataStructure> {
         _cache = new LHMCache<Integer, WeakReference<V>>(size);
         _datalen = len;
         try {
-            _rvCon = rvClass.getConstructor(conArg);
+            _rvCon = rvClass.getConstructor(byte[].class);
         } catch (NoSuchMethodException e) {
             throw new RuntimeException("SDSCache init error", e);
         }
@@ -90,9 +90,16 @@ public class SDSCache<V extends SimpleDataStructure> {
      */
     private class Shutdown implements Runnable {
         public void run() {
-            synchronized(_cache) {
-                _cache.clear();
-            }
+            clear();
+        }
+    }
+
+    /**
+     * @since 0.9.17
+     */
+    public void clear() {
+        synchronized(_cache) {
+            _cache.clear();
         }
     }
 
@@ -106,7 +113,7 @@ public class SDSCache<V extends SimpleDataStructure> {
      *  @return the cached value if available, otherwise
      *          makes a new object and returns it
      *  @throws IllegalArgumentException if data is not the correct number of bytes
-     *  @throws NPE
+     *  @throws NullPointerException
      */
     public V get(byte[] data) {
         if (data == null)
@@ -120,7 +127,7 @@ public class SDSCache<V extends SimpleDataStructure> {
                 rv = ref.get();
             else
                 rv = null;
-            if (rv != null && DataHelper.eq(data, rv.getData())) {
+            if (rv != null && Arrays.equals(data, rv.getData())) {
                 // found it, we don't need the data passed in any more
                 SimpleByteCache.release(data);
                 found = 1;
@@ -148,8 +155,8 @@ public class SDSCache<V extends SimpleDataStructure> {
      *  @param off offset in the array to start reading from
      *  @return the cached value if available, otherwise
      *          makes a new object and returns it
-     *  @throws AIOOBE if not enough bytes
-     *  @throws NPE
+     *  @throws ArrayIndexOutOfBoundsException if not enough bytes
+     *  @throws NullPointerException
      */
     public V get(byte[] b, int off) {
         byte[] data = SimpleByteCache.acquire(_datalen);

@@ -28,13 +28,13 @@ import net.i2p.util.Log;
  *
  * If the ArrayWrapper object in the HashSet is 50 bytes, and BloomSHA1(23, 11) is 1MB,
  * then for less than 20K entries this is smaller.
- * And this uses space proportional to traffiic, so it doesn't penalize small routers
+ * And this uses space proportional to traffic, so it doesn't penalize small routers
  * with a fixed 8MB.
  * So let's try it for the first 2 or 3, for now.
  *
- * Also, DBF is syncrhonized, and uses SimpleTimer.
+ * Also, DBF is synchronized, and uses SimpleTimer.
  * Here we use a read/write lock, with synchronization only
- * when switching double buffers, and we use SimpleScheduler.
+ * when switching double buffers, and we use SimpleTimer2.
  *
  * Yes, we could stare at stats all day, and try to calculate an acceptable
  * false-positive rate for each of the above uses, then estimate the DBF size
@@ -43,7 +43,7 @@ import net.i2p.util.Log;
  * to implement something with a zero false positive rate, and uses less memory
  * for almost all bandwidth classes.
  *
- * This has a strictly zero false positive rate for <= 8 byte keys.
+ * This has a strictly zero false positive rate for &lt;= 8 byte keys.
  * For larger keys, it is 1 / (2**64) ~= 5E-20, which is better than
  * DBF for any entry count greater than about 14K.
  *
@@ -183,8 +183,8 @@ public class DecayingHashSet extends DecayingBloomFilter {
     
     @Override
     protected void decay() {
-        int currentCount = 0;
-        long dups = 0;
+        int currentCount;
+        long dups;
         if (!getWriteLock())
             return;
         try {
@@ -208,7 +208,7 @@ public class DecayingHashSet extends DecayingBloomFilter {
     }
     
     /**
-     *  This saves the data as-is if the length is <= 8 bytes,
+     *  This saves the data as-is if the length is &lt;= 8 bytes,
      *  otherwise it stores an 8-byte hash.
      *  Hash function is from DataHelper, modded to get
      *  the maximum entropy given the length of the data.

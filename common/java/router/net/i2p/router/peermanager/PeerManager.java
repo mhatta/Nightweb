@@ -17,9 +17,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import net.i2p.data.Hash;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.router.PeerSelectionCriteria;
 import net.i2p.router.Router;
 import net.i2p.router.RouterContext;
@@ -43,6 +44,9 @@ class PeerManager {
     private final Map<Character, Set<Hash>> _peersByCapability;
     /** value strings are lower case */
     private final Map<Hash, String> _capabilitiesByPeer;
+    private final AtomicBoolean _storeLock = new AtomicBoolean();
+    private volatile long _lastStore;
+
     private static final long REORGANIZE_TIME = 45*1000;
     private static final long REORGANIZE_TIME_MEDIUM = 123*1000;
     /**
@@ -52,6 +56,8 @@ class PeerManager {
      *  Rate contained in the profile, as the Rates must be coalesced.
      */
     private static final long REORGANIZE_TIME_LONG = 351*1000;
+    private static final long STORE_TIME = 19*60*60*1000;
+    private static final long EXPIRE_AGE = 3*24*60*60*1000;
     
     public static final String TRACKED_CAPS = "" +
         FloodfillNetworkDatabaseFacade.CAPABILITY_FLOODFILL +
@@ -61,6 +67,8 @@ class PeerManager {
         Router.CAPABILITY_BW64 +
         Router.CAPABILITY_BW128 +
         Router.CAPABILITY_BW256 +
+        Router.CAPABILITY_BW512 +
+        Router.CAPABILITY_BW_UNLIMITED +
         Router.CAPABILITY_REACHABLE +
         Router.CAPABILITY_UNREACHABLE;
 
@@ -80,7 +88,7 @@ class PeerManager {
             _peersByCapability.put(Character.valueOf(Character.toLowerCase(TRACKED_CAPS.charAt(i))), new ConcurrentHashSet<Hash>());
         loadProfilesInBackground();
         ////_context.jobQueue().addJob(new EvaluateProfilesJob(_context));
-        //SimpleScheduler.getInstance().addPeriodicEvent(new Reorg(), 0, REORGANIZE_TIME);
+        //SimpleTimer2.getInstance().addPeriodicEvent(new Reorg(), 0, REORGANIZE_TIME);
         //new Reorg();
         //_context.jobQueue().addJob(new PersistProfilesJob(_context, this));
     }
@@ -95,11 +103,14 @@ class PeerManager {
     }
 
     /**
+     *  Reorganize the profiles. Also periodically store them,
+     *  and delete very old ones.
+     *
      *  This takes too long to run on the SimpleTimer2 queue
      *  @since 0.9.10
      */
     private class ReorgThread extends I2PThread {
-        private SimpleTimer2.TimedEvent _event;
+        private final SimpleTimer2.TimedEvent _event;
 
         public ReorgThread(SimpleTimer2.TimedEvent event) {
             super("PeerManager Reorg");
@@ -115,6 +126,19 @@ class PeerManager {
                 _log.log(Log.CRIT, "Error evaluating profiles", t);
             }
             long orgtime = System.currentTimeMillis() - start;
+            if (_lastStore == 0) {
+                _lastStore = start;
+            } else if (start - _lastStore > STORE_TIME) {
+                _lastStore = start;
+                try {
+                    _log.debug("Periodic profile store start");
+                    storeProfiles();
+                    _persistenceHelper.deleteOldProfiles(EXPIRE_AGE);
+                    _log.debug("Periodic profile store end");
+                } catch (Throwable t) {
+                    _log.log(Log.CRIT, "Error storing profiles", t);
+                }
+            }
             long uptime = _context.router().getUptime();
             long delay;
             if (orgtime > 1000 || uptime > 2*60*60*1000)
@@ -128,9 +152,16 @@ class PeerManager {
     }
     
     void storeProfiles() {
-        Set<Hash> peers = selectPeers();
-        for (Hash peer : peers) {
-            storeProfile(peer);
+        // lock in case shutdown bumps into periodic store
+        if (!_storeLock.compareAndSet(false, true))
+            return;
+        try {
+            Set<Hash> peers = selectPeers();
+            for (Hash peer : peers) {
+                storeProfile(peer);
+            }
+        } finally {
+            _storeLock.set(false);
         }
     }
 
@@ -163,7 +194,7 @@ class PeerManager {
      *  @since 0.8.8
      */
     private void loadProfilesInBackground() {
-        (new Thread(new ProfileLoader())).start();
+        (new I2PThread(new ProfileLoader())).start();
     }
 
     /**
@@ -191,7 +222,8 @@ class PeerManager {
     }
     
     /**
-     * Find some peers that meet the criteria and we have the netDb info for locally
+     * Find some peers that meet the criteria and we have the netDb info for locally.
+     * Returned list will not include ourselves.
      *
      * Only used by PeerTestJob (PURPOSE_TEST)
      */

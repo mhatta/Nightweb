@@ -2,6 +2,7 @@ package net.i2p.router.startup;
 
 import java.io.IOException;
 import java.io.Writer;
+import java.text.Collator;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -22,21 +23,19 @@ import net.i2p.util.Log;
  *
  *  @since 0.9.4
  */
-public class RouterAppManager implements ClientAppManager {
-    
+public class RouterAppManager extends ClientAppManagerImpl {
+
     private final RouterContext _context;
     private final Log _log;
     // client to args
     // this assumes clients do not override equals()
     private final ConcurrentHashMap<ClientApp, String[]> _clients;
-    // registered name to client
-    private final ConcurrentHashMap<String, ClientApp> _registered;
 
     public RouterAppManager(RouterContext ctx) {
+        super(ctx);
         _context = ctx;
         _log = ctx.logManager().getLog(RouterAppManager.class);
         _clients = new ConcurrentHashMap<ClientApp, String[]>(16);
-        _registered = new ConcurrentHashMap<String, ClientApp>(8);
         ctx.addShutdownTask(new Shutdown());
     }
 
@@ -48,7 +47,7 @@ public class RouterAppManager implements ClientAppManager {
     public boolean addAndStart(ClientApp app, String[] args) {
         if (_log.shouldLog(Log.INFO))
             _log.info("Client " + app.getDisplayName() + " ADDED");
-        String[] old = _clients.put(app, args);
+        String[] old = _clients.putIfAbsent(app, args);
         if (old != null)
             throw new IllegalArgumentException("already added");
         try {
@@ -77,6 +76,26 @@ public class RouterAppManager implements ClientAppManager {
                 Arrays.equals(e.getValue(), args))
                 return e.getKey();
         }
+        // workaround for Jetty stop and restart from i2ptunnel
+        // app becomes untracked so look in registered
+        if (className.equals("net.i2p.jetty.JettyStart") && args.length > 0) {
+            for (ClientApp app : _registered.values()) {
+                if (app.getClass().getName().equals(className)) {
+                    String dname = app.getDisplayName();
+                    int idx = 0;
+                    boolean match = true;
+                    for (String arg : args) {
+                        idx = dname.indexOf(arg, idx);
+                        if (idx < 0) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match)
+                        return app;
+                }
+            }
+        }
         return null;
     }
 
@@ -91,6 +110,7 @@ public class RouterAppManager implements ClientAppManager {
      *  @param message may be null
      *  @param e may be null
      */
+    @Override
     public void notify(ClientApp app, ClientAppState state, String message, Exception e) {
         switch(state) {
           case UNINITIALIZED:
@@ -128,7 +148,7 @@ public class RouterAppManager implements ClientAppManager {
             break;
         }
     }
-    
+
     /**
      *  Register with the manager under the given name,
      *  so that other clients may find it.
@@ -137,6 +157,7 @@ public class RouterAppManager implements ClientAppManager {
      *  @param app non-null
      *  @return true if successful, false if duplicate name
      */
+    @Override
     public boolean register(ClientApp app) {
         if (!_clients.containsKey(app)) {
             // Allow registration even if we didn't start it,
@@ -148,30 +169,7 @@ public class RouterAppManager implements ClientAppManager {
         if (_log.shouldLog(Log.INFO))
             _log.info("Client " + app.getDisplayName() + " REGISTERED AS " + app.getName());
         // TODO if old app in there is not running and != this app, allow replacement
-        return _registered.putIfAbsent(app.getName(), app) == null;
-    }
-    
-    /**
-     *  Unregister with the manager. Name must be the same as that from register().
-     *  Only required for apps used by other apps.
-     *
-     *  @param app non-null
-     */
-    public void unregister(ClientApp app) {
-        _registered.remove(app.getName(), app);
-    }
-    
-    /**
-     *  Get a registered app.
-     *  Only used for apps finding other apps.
-     *  Do not hold a static reference.
-     *  If you only need to find a port, use the PortMapper instead.
-     *
-     *  @param name non-null
-     *  @return client app or null
-     */
-    public ClientApp getRegisteredApp(String name) {
-        return _registered.get(name);
+        return super.register(app);
     }
 
     /// end ClientAppManager interface
@@ -185,6 +183,8 @@ public class RouterAppManager implements ClientAppManager {
             ClientAppState state = app.getState();
             if (state == RUNNING || state == STARTING) {
                 try {
+                   if (_log.shouldWarn())
+                       _log.warn("Shutting down client " + app.getDisplayName());
                     app.shutdown(null);
                 } catch (Throwable t) {}
             }
@@ -208,9 +208,13 @@ public class RouterAppManager implements ClientAppManager {
         StringBuilder buf = new StringBuilder(1024);
         buf.append("<h2>App Manager</h2>");
         buf.append("<h3>Tracked</h3>");
+        buf.append("<div class=\"debug_container\">");
         toString1(buf);
+        buf.append("</div>");
         buf.append("<h3>Registered</h3>");
+        buf.append("<div class=\"debug_container\">");
         toString2(buf);
+        buf.append("</div>");
         out.write(buf.toString());
     }
 
@@ -223,9 +227,9 @@ public class RouterAppManager implements ClientAppManager {
         for (Map.Entry<ClientApp, String[]> entry : _clients.entrySet()) {
             ClientApp key = entry.getKey();
             String[] val = entry.getValue();
-            list.add("[" + key.getName() + "] = [" + key.getClass().getName() + ' ' + Arrays.toString(val) + "] " + key.getState() + "<br>");
+            list.add("[<b>" + key.getName() + "</b>] = [" + key.getClass().getName() + ' ' + Arrays.toString(val) + "] <i>" + key.getState() + "</i><br>");
         }
-        Collections.sort(list);
+        Collections.sort(list, Collator.getInstance());
         for (String e : list) {
             buf.append(e);
         }
@@ -240,9 +244,9 @@ public class RouterAppManager implements ClientAppManager {
         for (Map.Entry<String, ClientApp> entry : _registered.entrySet()) {
             String key = entry.getKey();
             ClientApp val = entry.getValue();
-            list.add("[" + key + "] = [" + val.getClass().getName() + "]<br>");
+            list.add("[<b>" + key + "</b>] = [" + val.getClass().getName() + "]<br>");
         }
-        Collections.sort(list);
+        Collections.sort(list, Collator.getInstance());
         for (String e : list) {
             buf.append(e);
         }

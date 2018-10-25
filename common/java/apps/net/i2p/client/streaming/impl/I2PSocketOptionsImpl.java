@@ -17,6 +17,7 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
     private int _remotePort;
     
     public static final int DEFAULT_BUFFER_SIZE = 1024*64;
+    public static final int DEFAULT_READ_TIMEOUT = -1;
     public static final int DEFAULT_WRITE_TIMEOUT = -1;
     public static final int DEFAULT_CONNECT_TIMEOUT = 60*1000;
     
@@ -47,6 +48,9 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
     /**
      *  Sets max buffer size, connect timeout, read timeout, and write timeout
      *  from properties. Does not set local port or remote port.
+     *
+     *  As of 0.9.19, defaults in opts are honored.
+     *
      *  @param opts may be null
      */
     public I2PSocketOptionsImpl(Properties opts) {
@@ -56,17 +60,20 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
     /**
      *  Sets max buffer size, connect timeout, read timeout, and write timeout
      *  from properties. Does not set local port or remote port.
+     *
+     *  As of 0.9.19, defaults in opts are honored.
+     *
      *  @param opts may be null
      */
     public void setProperties(Properties opts) {
         if (opts == null) return;
-        if (opts.containsKey(PROP_BUFFER_SIZE))
+        if (opts.getProperty(PROP_BUFFER_SIZE) != null)
             _maxBufferSize = getInt(opts, PROP_BUFFER_SIZE, DEFAULT_BUFFER_SIZE);
-        if (opts.containsKey(PROP_CONNECT_TIMEOUT))
+        if (opts.getProperty(PROP_CONNECT_TIMEOUT) != null)
             _connectTimeout = getInt(opts, PROP_CONNECT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT);
-        if (opts.containsKey(PROP_READ_TIMEOUT))
-            _readTimeout = getInt(opts, PROP_READ_TIMEOUT, -1);
-        if (opts.containsKey(PROP_WRITE_TIMEOUT))
+        if (opts.getProperty(PROP_READ_TIMEOUT) != null)
+            _readTimeout = getInt(opts, PROP_READ_TIMEOUT, DEFAULT_READ_TIMEOUT);
+        if (opts.getProperty(PROP_WRITE_TIMEOUT) != null)
             _writeTimeout = getInt(opts, PROP_WRITE_TIMEOUT, DEFAULT_WRITE_TIMEOUT);
     }
     
@@ -95,6 +102,9 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
         }
     }
     
+    /**
+     *  Not part of the API, not for external use.
+     */
     public static double getDouble(Properties opts, String name, double defaultVal) {
         if (opts == null) return defaultVal;
         String val = opts.getProperty(name);
@@ -113,7 +123,7 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
      * How long we will wait for the ACK from a SYN, in milliseconds.
      *
      * Default 60 seconds. Max of 2 minutes enforced in Connection.java,
-     * and it also interprets <= 0 as default.
+     * and it also interprets &lt;= 0 as default.
      *
      * @return milliseconds to wait, or -1 if we will wait indefinitely
      */
@@ -125,7 +135,7 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
      * Define how long we will wait for the ACK from a SYN, in milliseconds.
      *
      * Default 60 seconds. Max of 2 minutes enforced in Connection.java,
-     * and it also interprets <= 0 as default.
+     * and it also interprets &lt;= 0 as default.
      *
      */
     public void setConnectTimeout(long ms) {
@@ -135,9 +145,12 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
     /**
      * What is the longest we'll block on the input stream while waiting
      * for more data.  If this value is exceeded, the read() throws 
-     * InterruptedIOException
+     * SocketTimeoutException as of 0.9.36.
+     * Prior to that, the read() returned -1 or 0.
      *
      * WARNING: Default -1 (unlimited), which is probably not what you want.
+     *
+     * @return timeout in ms, 0 for nonblocking, -1 for forever
      */
     public long getReadTimeout() {
         return _readTimeout;
@@ -146,9 +159,12 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
     /**
      * What is the longest we'll block on the input stream while waiting
      * for more data.  If this value is exceeded, the read() throws 
-     * InterruptedIOException
+     * SocketTimeoutException as of 0.9.36.
+     * Prior to that, the read() returned -1 or 0.
      *
      * WARNING: Default -1 (unlimited), which is probably not what you want.
+     *
+     * @param ms timeout in ms, 0 for nonblocking, -1 for forever
      */
     public void setReadTimeout(long ms) {
         _readTimeout = ms;
@@ -217,9 +233,12 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
     /**
      *  The remote port.
      *  @param port 0 - 65535
+     *  @throws IllegalArgumentException
      *  @since 0.8.9
      */
     public void setPort(int port) {
+        if (port < 0 || port > 65535)
+            throw new IllegalArgumentException("bad port");
         _remotePort = port;
     }
 
@@ -238,9 +257,12 @@ class I2PSocketOptionsImpl implements I2PSocketOptions {
      *  Nonzero means you will get traffic ONLY for that port, use with care,
      *  as most applications do not specify a remote port.
      *  @param port 0 - 65535
+     *  @throws IllegalArgumentException
      *  @since 0.8.9
      */
     public void setLocalPort(int port) {
+        if (port < 0 || port > 65535)
+            throw new IllegalArgumentException("bad port");
         _localPort = port;
     }
 }

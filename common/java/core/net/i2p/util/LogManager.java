@@ -10,7 +10,10 @@ package net.i2p.util;
  */
 
 import java.io.File;
+import java.io.Flushable;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.text.DateFormat;
 import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
@@ -21,7 +24,6 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Queue;
 import java.util.Set;
-import java.util.TimeZone;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,7 +39,7 @@ import net.i2p.data.DataHelper;
  * writes them where appropriate.
  * 
  */
-public class LogManager {
+public class LogManager implements Flushable {
     public final static String CONFIG_LOCATION_PROP = "loggerConfigLocation";
     public final static String FILENAME_OVERRIDE_PROP = "loggerFilenameOverride";
     public final static String CONFIG_LOCATION_DEFAULT = "logger.config";
@@ -61,6 +63,8 @@ public class LogManager {
     private static final String PROP_DROP = "logger.dropOnOverflow";
     /** @since 0.9.3 */
     private static final String PROP_DUP = "logger.dropDuplicates";
+    /** @since 0.9.18 */
+    private static final String PROP_FLUSH = "logger.flushInterval";
     public final static String PROP_RECORD_PREFIX = "logger.record.";
 
     public final static String DEFAULT_FORMAT = DATE + " " + PRIORITY + " [" + THREAD + "] " + CLASS + ": " + MESSAGE;
@@ -125,6 +129,8 @@ public class LogManager {
     private boolean _dropOnOverflow;
     private boolean _dropDuplicates;
     private final AtomicLong _droppedRecords = new AtomicLong();
+    // in seconds
+    private int _flushInterval = (int) (LogWriter.FLUSH_INTERVAL / 1000);
     
     private boolean _alreadyNoticedMissingConfig;
 
@@ -144,14 +150,18 @@ public class LogManager {
         // so it doesn't create a log directory and log files unless there is output.
         // In the router context, we have to rotate to a new log file at startup or the logs.jsp
         // page will display the old log.
-        if (context.isRouterContext())
+        if (context.isRouterContext()) {
             startLogWriter();
-        try {
-            Runtime.getRuntime().addShutdownHook(new ShutdownHook());
-        } catch (IllegalStateException ise) {
-            // shutdown in progress, fsck it
+        } else {
+            // Only in App Context.
+            // In Router Context, the router has its own shutdown hook,
+            // and will call our shutdown() from Router.finalShutdown()
+            try {
+                Runtime.getRuntime().addShutdownHook(new ShutdownHook());
+            } catch (IllegalStateException ise) {
+                // shutdown in progress
+            }
         }
-        //System.out.println("Created logManager " + this + " with context: " + context);
     }
 
     /** @since 0.8.2 */
@@ -159,7 +169,24 @@ public class LogManager {
         // yeah, this doesn't always work, _writer should be volatile
         if (_writer != null)
             return;
-        _writer = new LogWriter(this);
+        if (SystemVersion.isAndroid()) {
+            try {
+                Class<? extends LogWriter> clazz = Class.forName(
+                        "net.i2p.util.AndroidLogWriter"
+                    ).asSubclass(LogWriter.class);
+                Constructor<? extends LogWriter> ctor = clazz.getDeclaredConstructor(LogManager.class);
+                _writer = ctor.newInstance(this);
+            } catch (ClassNotFoundException e) {
+            } catch (InstantiationException e) {
+            } catch (IllegalAccessException e) {
+            } catch (InvocationTargetException e) {
+            } catch (NoSuchMethodException e) {
+            }
+        }
+        // Default writer
+        if (_writer == null)
+            _writer = new FileLogWriter(this);
+        _writer.setFlushInterval(_flushInterval * 1000);
         // if you enable logging in I2PThread again, you MUST change this back to Thread
         Thread t = new I2PThread(_writer, "LogWriter");
         t.setDaemon(true);
@@ -205,6 +232,7 @@ public class LogManager {
     public LogConsoleBuffer getBuffer() { return _consoleBuffer; }
         
     /** @deprecated unused */
+    @Deprecated
     public void setDisplayOnScreen(boolean yes) {
         _displayOnScreen = yes;
     }
@@ -218,6 +246,7 @@ public class LogManager {
     }
 
     /** @deprecated unused */
+    @Deprecated
     public void setDisplayOnScreenLevel(int level) {
         _onScreenLimit = level;
     }
@@ -227,6 +256,7 @@ public class LogManager {
     }
 
     /** @deprecated unused */
+    @Deprecated
     public void setConsoleBufferSize(int numRecords) {
         _consoleBufferSize = numRecords;
     }
@@ -238,6 +268,10 @@ public class LogManager {
         loadConfig();
     }
 
+    /**
+     *  File may not exist or have old logs in it if not opened yet
+     *  @return non-null
+     */
     public String currentFile() {
         if (_writer == null)
             return ("No log file created yet");
@@ -269,6 +303,10 @@ public class LogManager {
             try {
                 _records.put(record);
             } catch (InterruptedException ie) {}
+        } else if (_flushInterval <= 0) {
+            synchronized (_writer) {
+                _writer.notifyAll();
+            }
         }
     }
     
@@ -384,6 +422,17 @@ public class LogManager {
                 _logBufferSize = Integer.parseInt(str);
         } catch (NumberFormatException nfe) {}
 
+        try {
+            String str = config.getProperty(PROP_FLUSH);
+            if (str != null) {
+                _flushInterval = Integer.parseInt(str);
+                synchronized(this) {
+                    if (_writer != null)
+                        _writer.setFlushInterval(_flushInterval * 1000);
+                }
+            }
+        } catch (NumberFormatException nfe) {}
+
         _dropOnOverflow = Boolean.parseBoolean(config.getProperty(PROP_DROP));
         String str = config.getProperty(PROP_DUP);
         _dropDuplicates = str == null || Boolean.parseBoolean(str);
@@ -458,9 +507,7 @@ public class LogManager {
             if (!format.equals(""))
                 fmt.applyPattern(format);
             // the router sets the JVM time zone to UTC but saves the original here so we can get it
-            String systemTimeZone = _context.getProperty("i2p.systemTimeZone");
-            if (systemTimeZone != null)
-                fmt.setTimeZone(TimeZone.getTimeZone(systemTimeZone));
+            fmt.setTimeZone(SystemVersion.getSystemTimeZone(_context));
             _dateFormatPattern = format;
             _dateFormat = fmt;
             return true;
@@ -509,7 +556,9 @@ public class LogManager {
             String v = size.trim().toUpperCase(Locale.US);
             if (v.length() < 2)
                 return -1;
-            if (v.endsWith("B"))
+            if (v.endsWith("IB"))
+                v = v.substring(0, v.length() - 2);
+            else if (v.endsWith("B"))
                 v = v.substring(0, v.length() - 1);
             char mod = v.charAt(v.length() - 1);
             if (!Character.isDigit(mod)) v = v.substring(0, v.length() - 1);
@@ -647,6 +696,7 @@ public class LogManager {
         rv.setProperty(PROP_DEFAULTLEVEL, Log.toLevelString(_defaultLimit));
         rv.setProperty(PROP_DISPLAYONSCREENLEVEL, Log.toLevelString(_onScreenLimit));
         rv.setProperty(PROP_CONSOLEBUFFERSIZE, Integer.toString(_consoleBufferSize));
+        rv.setProperty(PROP_FLUSH, Integer.toString(_flushInterval));
 
         for (LogLimit lim : _limits) {
             rv.setProperty(PROP_RECORD_PREFIX + lim.getRootName(), Log.toLevelString(lim.getLimit()));
@@ -741,7 +791,7 @@ public class LogManager {
 
     private static final AtomicInteger __id = new AtomicInteger();
 
-    private class ShutdownHook extends Thread {
+    private class ShutdownHook extends I2PAppThread {
         private final int _id;
         public ShutdownHook() {
             _id = __id.incrementAndGet();

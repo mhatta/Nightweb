@@ -11,11 +11,13 @@ package net.i2p.router.transport;
 import java.io.IOException;
 import java.io.Writer;
 import java.util.List;
+import java.util.Set;
 import java.util.Vector;
 
 import net.i2p.data.Hash;
-import net.i2p.data.RouterAddress;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterAddress;
+import net.i2p.data.router.RouterInfo;
+import net.i2p.router.CommSystemFacade.Status;
 import net.i2p.router.OutNetMessage;
 
 /**
@@ -26,7 +28,16 @@ import net.i2p.router.OutNetMessage;
  *
  */
 public interface Transport {
-    public TransportBid bid(RouterInfo toAddress, long dataSize);
+
+    /**
+     *
+     * @param dataSize assumes full 16-byte header, transports should
+     *        adjust as necessary
+     * @return a bid or null if unwilling to send
+     *
+     */
+    public TransportBid bid(RouterInfo toAddress, int dataSize);
+
     /**
      * Asynchronously send the message as requested in the message and, if the
      * send is successful, queue up any msg.getOnSendJob job, and register it
@@ -98,6 +109,24 @@ public interface Transport {
     public void externalAddressReceived(AddressSource source, byte[] ip, int port);
 
     /**
+     *  Notify a transport of an external address change.
+     *  This may be from a local interface, UPnP, a config change, etc.
+     *  This should not be called if the ip didn't change
+     *  (from that source's point of view), or is a local address.
+     *  May be called multiple times for IPv4 or IPv6.
+     *  The transport should also do its own checking on whether to accept
+     *  notifications from this source.
+     *
+     *  This can be called after the transport is running.
+     *
+     *  TODO externalAddressRemoved(source, ip, port)
+     *
+     *  @param source defined in Transport.java
+     *  @since 0.9.20
+     */
+    public void externalAddressRemoved(AddressSource source, boolean ipv6);
+
+    /**
      *  Notify a transport of the results of trying to forward a port.
      *
      *  @param ip may be null
@@ -122,6 +151,12 @@ public interface Transport {
     /** The unique identity of this Transport */
     public String getStyle();
     
+    /**
+     * @return may or may not be modifiable; check implementation
+     * @since 0.9.34
+     */
+    public Set<Hash> getEstablished();    
+
     public int countPeers();    
     public int countActivePeers();    
     public int countActiveSendPeers();
@@ -131,8 +166,18 @@ public interface Transport {
     public List<String> getMostRecentErrorMessages();
     
     public void renderStatusHTML(Writer out, String urlBase, int sortFlags) throws IOException;
-    public short getReachabilityStatus();
+
+    /**
+     *  Previously returned short, now enum as of 0.9.20
+     */
+    public Status getReachabilityStatus();
+
+    /**
+     * @deprecated unused
+     */
+    @Deprecated
     public void recheckReachability();
+
     public boolean isBacklogged(Hash peer);
 
     /**
@@ -143,4 +188,12 @@ public interface Transport {
     
     public boolean isUnreachable(Hash peer);
     public boolean isEstablished(Hash peer);
+
+    /**
+     * Tell the transport that we may disconnect from this peer.
+     * This is advisory only.
+     *
+     * @since 0.9.24
+     */
+    public void mayDisconnect(Hash peer);
 }

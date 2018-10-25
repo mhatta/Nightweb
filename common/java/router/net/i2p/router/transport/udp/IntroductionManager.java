@@ -3,6 +3,8 @@ package net.i2p.router.transport.udp;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -11,13 +13,14 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.i2p.data.Base64;
-import net.i2p.data.RouterAddress;
-import net.i2p.data.RouterInfo;
+import net.i2p.data.router.RouterAddress;
+import net.i2p.data.router.RouterInfo;
 import net.i2p.data.SessionKey;
 import net.i2p.router.RouterContext;
 import net.i2p.util.Addresses;
 import net.i2p.util.ConcurrentHashSet;
 import net.i2p.util.Log;
+import net.i2p.router.transport.TransportUtil;
 
 /**
  *  Keep track of inbound and outbound introductions.
@@ -96,6 +99,7 @@ class IntroductionManager {
     private static final long PUNCH_CLEAN_TIME = 5*1000;
     /** Max for all targets per PUNCH_CLEAN_TIME */
     private static final int MAX_PUNCHES = 8;
+    private static final long INTRODUCER_EXPIRATION = 80*60*1000L;
 
     public IntroductionManager(RouterContext ctx, UDPTransport transport) {
         _context = ctx;
@@ -119,7 +123,7 @@ class IntroductionManager {
     public void add(PeerState peer) {
         if (peer == null) return;
         // let's not use an introducer on a privileged port, sounds like trouble
-        if (peer.getRemotePort() < 1024)
+        if (!TransportUtil.isValidPort(peer.getRemotePort()))
             return;
         // Only allow relay as Bob or Charlie if the Bob-Charlie session is IPv4
         if (peer.getRemoteIP().length != 4)
@@ -139,8 +143,9 @@ class IntroductionManager {
         if (_log.shouldLog(Log.DEBUG))
             _log.debug("removing peer " + peer.getRemoteHostId() + ", weRelayToThemAs " 
                        + peer.getWeRelayToThemAs() + ", theyRelayToUsAs " + peer.getTheyRelayToUsAs());
-        if (peer.getWeRelayToThemAs() > 0) 
-            _outbound.remove(Long.valueOf(peer.getWeRelayToThemAs()));
+        long id = peer.getWeRelayToThemAs(); 
+        if (id > 0) 
+            _outbound.remove(Long.valueOf(id));
         if (peer.getTheyRelayToUsAs() > 0) {
             _inbound.remove(peer);
         }
@@ -161,9 +166,13 @@ class IntroductionManager {
      * Also, ping all idle peers that were introducers in the last 2 hours,
      * to keep the connection up, since the netDb can have quite stale information,
      * and we want to keep our introducers valid.
+     *
+     * @param current current router address, may be null
+     * @param ssuOptions out parameter, options are added
+     * @return number of introducers added
      */
-    public int pickInbound(Properties ssuOptions, int howMany) {
-        int start = _context.random().nextInt(Integer.MAX_VALUE);
+    public int pickInbound(RouterAddress current, Properties ssuOptions, int howMany) {
+        int start = _context.random().nextInt();
         if (_log.shouldLog(Log.DEBUG))
             _log.debug("Picking inbound out of " + _inbound.size());
         if (_inbound.isEmpty()) return 0;
@@ -171,10 +180,12 @@ class IntroductionManager {
         int sz = peers.size();
         start = start % sz;
         int found = 0;
-        long inactivityCutoff = _context.clock().now() - (UDPTransport.EXPIRE_TIMEOUT / 2);    // 15 min
+        long now = _context.clock().now();
+        long inactivityCutoff = now - (UDPTransport.EXPIRE_TIMEOUT / 2);    // 15 min
         // if not too many to choose from, be less picky
         if (sz <= howMany + 2)
             inactivityCutoff -= UDPTransport.EXPIRE_TIMEOUT / 4;
+        List<Introducer> introducers = new ArrayList<Introducer>(howMany);
         for (int i = 0; i < sz && found < howMany; i++) {
             PeerState cur = peers.get((start + i) % sz);
             RouterInfo ri = _context.netDb().lookupRouterInfoLocally(cur.getRemotePeer());
@@ -218,17 +229,91 @@ class IntroductionManager {
                 _log.info("Picking introducer: " + cur);
             cur.setIntroducerTime();
             UDPAddress ura = new UDPAddress(ra);
-            ssuOptions.setProperty(UDPAddress.PROP_INTRO_HOST_PREFIX + found, Addresses.toString(ip));
-            ssuOptions.setProperty(UDPAddress.PROP_INTRO_PORT_PREFIX + found, String.valueOf(port));
-            ssuOptions.setProperty(UDPAddress.PROP_INTRO_KEY_PREFIX + found, Base64.encode(ura.getIntroKey()));
-            ssuOptions.setProperty(UDPAddress.PROP_INTRO_TAG_PREFIX + found, String.valueOf(cur.getTheyRelayToUsAs()));
+            byte[] ikey = ura.getIntroKey();
+            if (ikey == null)
+                continue;
+            introducers.add(new Introducer(ip, port, ikey, cur.getTheyRelayToUsAs()));
             found++;
+        }
+
+        // we sort them so a change in order only won't happen, and won't cause a republish
+        Collections.sort(introducers);
+        String exp = Long.toString((now + INTRODUCER_EXPIRATION) / 1000);
+        for (int i = 0; i < found; i++) {
+            Introducer in = introducers.get(i);
+            ssuOptions.setProperty(UDPAddress.PROP_INTRO_HOST_PREFIX + i, in.sip);
+            ssuOptions.setProperty(UDPAddress.PROP_INTRO_PORT_PREFIX + i, in.sport);
+            ssuOptions.setProperty(UDPAddress.PROP_INTRO_KEY_PREFIX + i, in.skey);
+            ssuOptions.setProperty(UDPAddress.PROP_INTRO_TAG_PREFIX + i, in.stag);
+            String sexp = exp;
+            // look for existing expiration in current published
+            // and reuse if still recent enough, so deepEquals() won't fail in UDPT.rEA
+            if (current != null) {
+                for (int j = 0; j < UDPTransport.PUBLIC_RELAY_COUNT; j++) {
+                    if (in.sip.equals(current.getOption(UDPAddress.PROP_INTRO_HOST_PREFIX + j)) &&
+                        in.sport.equals(current.getOption(UDPAddress.PROP_INTRO_PORT_PREFIX + j)) &&
+                        in.skey.equals(current.getOption(UDPAddress.PROP_INTRO_KEY_PREFIX + j)) &&
+                        in.stag.equals(current.getOption(UDPAddress.PROP_INTRO_TAG_PREFIX + j))) {
+                        // found old one
+                        String oexp = current.getOption(UDPAddress.PROP_INTRO_EXP_PREFIX + j);
+                        if (oexp != null) {
+                            try {
+                                long oex = Long.parseLong(oexp) * 1000;
+                                if (oex > now + UDPTransport.INTRODUCER_EXPIRATION_MARGIN) {
+                                    // still good, use old expiration time
+                                    sexp = oexp;
+                                }
+                            } catch (NumberFormatException nfe) {}
+                        }
+                        break;
+                    }
+                }
+            }
+            ssuOptions.setProperty(UDPAddress.PROP_INTRO_EXP_PREFIX + i, sexp);
         }
 
         // FIXME failsafe if found == 0, relax inactivityCutoff and try again?
 
         pingIntroducers();
         return found;
+    }
+
+    /**
+     *  So we can sort them
+     *  @since 0.9.18
+     */
+    private static class Introducer implements Comparable<Introducer> {
+        public final String sip, sport, skey, stag;
+
+        public Introducer(byte[] ip, int port, byte[] key, long tag) {
+            sip = Addresses.toString(ip);
+            sport = String.valueOf(port);
+            skey = Base64.encode(key);
+            stag = String.valueOf(tag);
+        }
+
+        @Override
+        public int compareTo(Introducer i) {
+            return skey.compareTo(i.skey);
+        }
+        
+        @Override
+        public boolean equals(Object o) {
+        	if (o == null) {
+        		return false;
+        	}
+        	if (!(o instanceof Introducer)) {
+        		return false;
+        	}
+        	
+        	Introducer i = (Introducer) o;
+        	return this.compareTo(i) == 0;
+        }
+        
+        @Override
+        public int hashCode() {
+        	return skey.hashCode(); 
+        }
     }
 
     /**
@@ -273,6 +358,9 @@ class IntroductionManager {
      *  We are Charlie and we got this from Bob.
      *  Send a HolePunch to Alice, who will soon be sending us a RelayRequest.
      *  We should already have a session with Bob, but probably not with Alice.
+     *
+     *  If we don't have a session with Bob, we removed the relay tag from
+     *  our _outbound table, so this won't work.
      *
      *  We do some throttling here.
      */
@@ -385,12 +473,33 @@ class IntroductionManager {
         // and we don't read it here.
         // FIXME implement for getting Alice's IPv4 in RelayRequest sent over IPv6?
         // or is that just too easy to spoof?
-        if (!isValid(alice.getIP(), alice.getPort()) || ipSize != 0 || port != 0) {
-            if (_log.shouldLog(Log.WARN)) {
-                byte ip[] = new byte[ipSize];
-                rrReader.readIP(ip, 0);
-                _log.warn("Bad relay req from " + alice + " for " + Addresses.toString(ip, port));
+        byte[] aliceIP = alice.getIP();
+        int alicePort = alice.getPort();
+        if (!isValid(alice.getIP(), alice.getPort())) {
+            if (_log.shouldWarn())
+                _log.warn("Bad relay req from " + alice + " for " + Addresses.toString(aliceIP, alicePort));
+            _context.statManager().addRateData("udp.relayBadIP", 1);
+            return;
+        }
+        // prior to 0.9.24 we rejected any non-zero-length ip
+        // here we reject anything different
+        // TODO relay request over IPv6
+        if (ipSize != 0) {
+            byte ip[] = new byte[ipSize];
+            rrReader.readIP(ip, 0);
+            if (!Arrays.equals(aliceIP, ip)) {
+                if (_log.shouldWarn())
+                    _log.warn("Bad relay req from " + alice + " for " + Addresses.toString(ip, port));
+                _context.statManager().addRateData("udp.relayBadIP", 1);
+                return;
             }
+        }
+        // prior to 0.9.24 we rejected any nonzero port
+        // here we reject anything different
+        // TODO relay request over IPv6
+        if (port != 0 && port != alicePort) {
+            if (_log.shouldWarn())
+                _log.warn("Bad relay req from " + alice + " for " + Addresses.toString(aliceIP, port));
             _context.statManager().addRateData("udp.relayBadIP", 1);
             return;
         }
@@ -400,7 +509,7 @@ class IntroductionManager {
             if (_log.shouldLog(Log.INFO))
                 _log.info("Receive relay request from " + alice 
                       + " with unknown tag");
-            _context.statManager().addRateData("udp.receiveRelayRequestBadTag", 1, 0);
+            _context.statManager().addRateData("udp.receiveRelayRequestBadTag", 1);
             return;
         }
         if (_log.shouldLog(Log.INFO))
@@ -410,14 +519,35 @@ class IntroductionManager {
 
         // TODO throttle based on alice identity and/or intro tag?
 
-        _context.statManager().addRateData("udp.receiveRelayRequest", 1, 0);
-        byte key[] = new byte[SessionKey.KEYSIZE_BYTES];
-        reader.getRelayRequestReader().readAliceIntroKey(key, 0);
-        SessionKey aliceIntroKey = new SessionKey(key);
+        _context.statManager().addRateData("udp.receiveRelayRequest", 1);
+
         // send that peer an introduction for alice
         _transport.send(_builder.buildRelayIntro(alice, charlie, reader.getRelayRequestReader()));
+
         // send alice back charlie's info
-        _transport.send(_builder.buildRelayResponse(alice, charlie, reader.getRelayRequestReader().readNonce(), aliceIntroKey));
+        // lookup session so we can use session key if available
+        SessionKey cipherKey = null;
+        SessionKey macKey = null;
+        PeerState aliceState = _transport.getPeerState(alice);
+        if (aliceState != null) {
+            // established session (since 0.9.12)
+            cipherKey = aliceState.getCurrentCipherKey();
+            macKey = aliceState.getCurrentMACKey();
+        }
+        if (cipherKey == null || macKey == null) {
+            // no session, use intro key (was only way before 0.9.12)
+            byte key[] = new byte[SessionKey.KEYSIZE_BYTES];
+            reader.getRelayRequestReader().readAliceIntroKey(key, 0);
+            cipherKey = new SessionKey(key);
+            macKey = cipherKey;
+            if (_log.shouldLog(Log.INFO))
+                _log.info("Sending relay response (w/ intro key) to " + alice);
+        } else {
+            if (_log.shouldLog(Log.INFO))
+                _log.info("Sending relay response (in-session) to " + alice);
+        }
+        _transport.send(_builder.buildRelayResponse(alice, charlie, reader.getRelayRequestReader().readNonce(),
+                                                    cipherKey, macKey));
     }
 
     /**
@@ -427,8 +557,7 @@ class IntroductionManager {
      *  @since 0.9.3
      */
     private boolean isValid(byte[] ip, int port) {
-        return port >= UDPTransport.MIN_PEER_PORT &&
-               port <= 65535 &&
+        return TransportUtil.isValidPort(port) &&
                ip != null && ip.length == 4 &&
                _transport.isValid(ip) &&
                (!_transport.isTooClose(ip)) &&

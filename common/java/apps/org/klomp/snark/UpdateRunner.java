@@ -6,9 +6,13 @@ import java.util.List;
 
 import net.i2p.I2PAppContext;
 import net.i2p.crypto.TrustedUpdate;
+import net.i2p.data.DataHelper;
 import net.i2p.update.*;
 import net.i2p.util.Log;
 import net.i2p.util.SimpleTimer2;
+
+import org.klomp.snark.comments.CommentSet;
+
 
 /**
  *  The downloader for router signed updates.
@@ -109,7 +113,7 @@ class UpdateRunner implements UpdateTask, CompleteListener {
                     _umgr.notifyAttemptFailed(this, "No tracker, no DHT, no OT", null);
                     continue;
                 }
-                _snark = _smgr.addMagnet(name, ih, trackerURL, true, true, this);
+                _snark = _smgr.addMagnet(name, ih, trackerURL, true, true, null, this);
                 if (_snark != null) {
                     updateStatus("<b>" + _smgr.util().getString("Updating from {0}", linkify(updateURL)) + "</b>");
                     new Timeout();
@@ -182,7 +186,9 @@ class UpdateRunner implements UpdateTask, CompleteListener {
     private void fatal(String error) {
             if (_snark != null) {
                 if (_hasMetaInfo) {
-                    _smgr.stopTorrent(_snark, true);
+                    // avoid loop stopTorrent() ... updateStatus() ... fatal() ...
+                    if (!_snark.isStopped())
+                        _smgr.stopTorrent(_snark, true);
                     String file = _snark.getName();
                     _smgr.removeTorrent(file);
                     // delete torrent file
@@ -290,12 +296,31 @@ class UpdateRunner implements UpdateTask, CompleteListener {
         return _smgr.getSavedTorrentBitField(snark);
     }
 
+    public boolean getSavedPreserveNamesSetting(Snark snark) {
+        return _smgr.getSavedPreserveNamesSetting(snark);
+    }
+
+    public long getSavedUploaded(Snark snark) {
+        return _smgr.getSavedUploaded(snark);
+    }
+
+    /** @since 0.9.31 */
+    public CommentSet getSavedComments(Snark snark) {
+        return _smgr.getSavedComments(snark);
+    }
+
+    /** @since 0.9.31 */
+    public void locked_saveComments(Snark snark, CommentSet comments) {
+        _smgr.locked_saveComments(snark, comments);
+    }
+
     //////// end CompleteListener methods
 
     private static String linkify(String url) {
-        String durl = url.length() <= 28 ? url :
-                                           url.substring(0, 25) + "&hellip;";
-        return "<a target=\"_blank\" href=\"" + url + "\"/>" + durl + "</a>";
+        String durl = url.length() <= 28 ? DataHelper.escapeHTML(url) :
+                                           DataHelper.escapeHTML(url.substring(0, 25)) + "&hellip;";
+        // TODO urlEncode instead
+        return "<a target=\"_blank\" href=\"" + DataHelper.escapeHTML(url) + "\"/>" + durl + "</a>";
     }
 
     private void updateStatus(String s) {
