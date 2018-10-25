@@ -1,4 +1,4 @@
-(defproject nightweb-android/Nightweb "0.0.26"
+(defproject nightweb-android/Nightweb "0.0.27"
   :license {:name "Public Domain"
             :url "http://unlicense.org/UNLICENSE"}
   :min-lein-version "2.0.0"
@@ -7,7 +7,7 @@
 
   :source-paths ["src/clojure" "../common/clojure"]
   :java-source-paths ["src/java" "../common/java" "gen"]
-  :javac-options ["-target" "1.6" "-source" "1.6" "-Xlint:-options"]
+  :javac-options ["-target" "1.8" "-source" "1.8" "-Xlint:-options"]
 
   :dependencies [[com.h2database/h2 "1.3.175"]
                  [markdown-clj "0.9.36"]
