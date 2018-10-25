@@ -87,8 +87,6 @@ abstract class PersistDHT {
                  out.println(ni.toPersistentString());
                  count++;
             }
-            if (out.checkError())
-                throw new IOException("Failed write to " + file);
         } catch (IOException ioe) {
             if (log.shouldLog(Log.WARN))
                 log.warn("Error writing the DHT File", ioe);

@@ -52,7 +52,6 @@ public class PeerID implements Comparable<PeerID>
   private boolean triedDestLookup;
   private final int hash;
   private final I2PSnarkUtil util;
-  private String _toStringCache;
 
   public PeerID(byte[] id, Destination address)
   {
@@ -196,7 +195,6 @@ public class PeerID implements Comparable<PeerID>
    * Compares port, address and id.
    * @deprecated unused? and will NPE now that address can be null?
    */
-  @Deprecated
   public int compareTo(PeerID pid)
   {
     int result = port - pid.port;
@@ -218,15 +216,13 @@ public class PeerID implements Comparable<PeerID>
   }
 
   /**
-   * Returns the String "id@address" where id is the first 4 chars of the base64 encoded id
-   * and address is the first 6 chars of the base64 dest (was the base64 hash of the dest) which
+   * Returns the String "id@address" where id is the base64 encoded id
+   * and address is the base64 dest (was the base64 hash of the dest) which
    * should match what the bytemonsoon tracker reports on its web pages.
    */
-  @Override
+    @Override
   public String toString()
   {
-    if (_toStringCache != null)
-        return _toStringCache;
     if (id == null || address == null)
         return "unkn@" + Base64.encode(destHash).substring(0, 6);
     int nonZero = 0;
@@ -236,8 +232,7 @@ public class PeerID implements Comparable<PeerID>
             break;
         }
     }
-    _toStringCache = Base64.encode(id, nonZero, id.length-nonZero).substring(0,4) + "@" + address.toBase64().substring(0,6);
-    return _toStringCache;
+    return Base64.encode(id, nonZero, id.length-nonZero).substring(0,4) + "@" + address.toBase64().substring(0,6);
   }
 
   /**

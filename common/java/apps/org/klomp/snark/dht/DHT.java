@@ -36,22 +36,18 @@ public interface DHT {
     public void ping(Destination dest, int port);
 
     /**
-     *  Get peers for a torrent, and announce to the closest annMax nodes we find.
+     *  Get peers for a torrent, and announce to the closest node we find.
      *  Blocking!
      *  Caller should run in a thread.
      *
      *  @param ih the Info Hash (torrent)
      *  @param max maximum number of peers to return
-     *  @param maxWait the maximum time to wait (ms) must be &gt; 0
+     *  @param maxWait the maximum time to wait (ms) must be > 0
      *  @param annMax the number of peers to announce to
      *  @param annMaxWait the maximum total time to wait for announces, may be 0 to return immediately without waiting for acks
-     *  @param isSeed true if seed, false if leech
-     *  @param noSeeds true if we do not want seeds in the result
      *  @return possibly empty (never null)
      */
-    public Collection<Hash> getPeersAndAnnounce(byte[] ih, int max, long maxWait,
-                                                int annMax, long annMaxWait,
-                                                boolean isSeed, boolean noSeeds);
+    public Collection<Hash> getPeersAndAnnounce(byte[] ih, int max, long maxWait, int annMax, long annMaxWait);
 
     /**
      *  Announce to ourselves.
@@ -59,16 +55,16 @@ public interface DHT {
      *
      *  @param ih the Info Hash (torrent)
      */
-    public void announce(byte[] ih, boolean isSeed);
+    public void announce(byte[] ih);
 
     /**
-     *  Announce somebody else we know about to ourselves.
+     *  Announce somebody else we know about.
      *  Non-blocking.
      *
      *  @param ih the Info Hash (torrent)
      *  @param peerHash the peer's Hash
      */
-    public void announce(byte[] ih, byte[] peerHash, boolean isSeed);
+    public void announce(byte[] ih, byte[] peerHash);
 
     /**
      *  Remove reference to ourselves in the local tracker.
@@ -81,17 +77,16 @@ public interface DHT {
 
     /**
      *  Announce to the closest DHT peers.
-     *  Blocking unless maxWait &lt;= 0
+     *  Blocking unless maxWait <= 0
      *  Caller should run in a thread.
      *  This also automatically announces ourself to our local tracker.
      *  For best results do a getPeers() first so we have tokens.
      *
      *  @param ih the Info Hash (torrent)
      *  @param maxWait the maximum total time to wait (ms) or 0 to do all in parallel and return immediately.
-     *  @param isSeed true if seed, false if leech
      *  @return the number of successful announces, not counting ourselves.
      */
-    public int announce(byte[] ih, int max, long maxWait, boolean isSeed);
+    public int announce(byte[] ih, int max, long maxWait);
 
     /**
      * Stop everything.

@@ -74,11 +74,10 @@ public class MetaInfo
    *  @param files null for single-file torrent
    *  @param lengths null for single-file torrent
    *  @param announce_list may be null
-   *  @param created_by may be null
    */
   MetaInfo(String announce, String name, String name_utf8, List<List<String>> files, List<Long> lengths,
            int piece_length, byte[] piece_hashes, long length, boolean privateTorrent,
-           List<List<String>> announce_list, String created_by)
+           List<List<String>> announce_list)
   {
     this.announce = announce;
     this.name = name;
@@ -92,8 +91,8 @@ public class MetaInfo
     this.privateTorrent = privateTorrent;
     this.announce_list = announce_list;
     this.comment = null;
-    this.created_by = created_by;
-    this.creation_date = I2PAppContext.getGlobalContext().clock().now();
+    this.created_by = null;
+    this.creation_date = 0;
 
     // TODO if we add a parameter for other keys
     //if (other != null) {
@@ -221,9 +220,7 @@ public class MetaInfo
         Object o = val.getValue();
         // Is it supposed to be a number or a string?
         // i2psnark does it as a string. BEP 27 doesn't say.
-        // Transmission does numbers. So does libtorrent.
-        // We handle both as of 0.9.9.
-        // We switch to storing as number as of 0.9.14.
+        // Transmission does numbers.
         privateTorrent = "1".equals(o) ||
                          ((o instanceof Number) && ((Number) o).intValue() == 1);
     } else {
@@ -445,7 +442,7 @@ public class MetaInfo
 
   /**
    * The creation date (ms) or zero.
-   * As of 0.9.19, available for locally-created torrents.
+   * Not available for locally-created torrents.
    * @since 0.9.7
    */
   public long getCreationDate() {
@@ -464,7 +461,7 @@ public class MetaInfo
    * Return the length of a piece. All pieces are of equal length
    * except for the last one (<code>getPieces()-1</code>).
    *
-   * @throws IndexOutOfBoundsException when piece is equal to or
+   * @exception IndexOutOfBoundsException when piece is equal to or
    * greater then the number of pieces in the torrent.
    */
   public int getPieceLength(int piece)
@@ -518,10 +515,9 @@ public class MetaInfo
 
     sha1.update(bs, off, length);
     byte[] hash = sha1.digest();
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 20; i++)
       if (hash[i] != piece_hashes[20 * piece + i])
         return false;
-    }
     return true;
   }
   
@@ -541,10 +537,9 @@ public class MetaInfo
         _log.warn("Error checking", ioe);
         return false;
     }
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 20; i++)
       if (hash[i] != piece_hashes[20 * piece + i])
         return false;
-    }
     return true;
   }
 
@@ -596,14 +591,6 @@ public class MetaInfo
             m.put("announce", announce);
         if (announce_list != null)
             m.put("announce-list", announce_list);
-        // misc. optional  top-level stuff
-        if (comment != null)
-            m.put("comment", comment);
-        if (created_by != null)
-            m.put("created by", created_by);
-        if (creation_date != 0)
-            m.put("creation date", creation_date / 1000);
-
         Map<String, BEValue> info = createInfoMap();
         m.put("info", info);
         // don't save this locally, we should only do this once
@@ -634,9 +621,7 @@ public class MetaInfo
         info.put("name.utf-8", new BEValue(DataHelper.getUTF8(name_utf8)));
     // BEP 27
     if (privateTorrent)
-        // switched to number in 0.9.14
-        //info.put("private", new BEValue(DataHelper.getUTF8("1")));
-        info.put("private", new BEValue(Integer.valueOf(1)));
+        info.put("private", new BEValue(DataHelper.getUTF8("1")));
 
     info.put("piece length", new BEValue(Integer.valueOf(piece_length)));
     info.put("pieces", new BEValue(piece_hashes));

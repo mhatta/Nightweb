@@ -65,7 +65,6 @@ class PeerCheckerTask implements Runnable
         Peer worstDownloader = null;
 
         int uploaders = 0;
-        int interestedUploaders = 0;
         int removedCount = 0;
 
         long uploaded = 0;
@@ -76,15 +75,8 @@ class PeerCheckerTask implements Runnable
         List<Peer> removed = new ArrayList<Peer>();
         int uploadLimit = coordinator.allowedUploaders();
         boolean overBWLimit = coordinator.overUpBWLimit();
-        if (_log.shouldLog(Log.DEBUG))
-            _log.debug("START peers: " + peerList.size() + " uploaders: " + coordinator.getUploaders() +
-                       " interested: " + coordinator.getInterestedUploaders() +
-                       " limit: " + uploadLimit + " overBW? " + overBWLimit);
         DHT dht = _util.getDHT();
-        boolean fetchComments = _util.utCommentsEnabled();
-        int i = 0;
         for (Peer peer : peerList) {
-            i++;
 
             // Remove dying peers
             if (!peer.isConnected())
@@ -96,7 +88,7 @@ class PeerCheckerTask implements Runnable
                 continue;
               }
 
-            if (peer.getInactiveTime() > peer.getMaxInactiveTime()) {
+            if (peer.getInactiveTime() > PeerCoordinator.MAX_INACTIVE) {
                 if (_log.shouldLog(Log.WARN))
                     _log.warn("Disconnecting peer idle " +
                               DataHelper.formatDuration(peer.getInactiveTime()) + ": " + peer);
@@ -104,9 +96,7 @@ class PeerCheckerTask implements Runnable
                 continue;
             }
 
-            // we only count choking AND interested, so as not to steal a slot
-            // from some other torrent
-            if (peer.isInterested() && !peer.isChoking())
+            if (!peer.isChoking())
               uploaders++;
 
             long upload = peer.getUploaded();
@@ -136,23 +126,20 @@ class PeerCheckerTask implements Runnable
             // If we are at our max uploaders and we have lots of other
             // interested peers try to make some room.
             // (Note use of coordinator.uploaders)
-            int cup = coordinator.getUploaders();
-            if (((cup == uploadLimit
-                  && coordinator.getInterestedAndChoking() > 0)
-                 || cup > uploadLimit
-                 || overBWLimitChoke)
+            if (((coordinator.uploaders == uploadLimit
+                && coordinator.interestedAndChoking > 0)
+                || coordinator.uploaders > uploadLimit
+                || overBWLimitChoke)
                 && !peer.isChoking())
               {
                 // Check if it still wants pieces from us.
                 if (!peer.isInterested())
                   {
-                    // Note that we only choke if we are over our limits,
-                    // so a peer may remain unchoked even if uninterested.
                     if (_log.shouldLog(Log.DEBUG))
                         _log.debug("Choke uninterested peer: " + peer);
                     peer.setChoking(true);
                     uploaders--;
-                    coordinator.decrementUploaders(false);
+                    coordinator.uploaders--;
                     
                     // Put it at the back of the list
                     removed.add(peer);
@@ -163,8 +150,7 @@ class PeerCheckerTask implements Runnable
                         _log.debug("BW limit (" + upload + "/" + uploaded + "), choke peer: " + peer);
                     peer.setChoking(true);
                     uploaders--;
-                    interestedUploaders--;
-                    coordinator.decrementUploaders(true);
+                    coordinator.uploaders--;
                     removedCount++;
 
                     // Put it at the back of the list for fairness, even though we won't be unchoking this time
@@ -177,8 +163,7 @@ class PeerCheckerTask implements Runnable
                         _log.debug("Choke choking peer: " + peer);
                     peer.setChoking(true);
                     uploaders--;
-                    interestedUploaders--;
-                    coordinator.decrementUploaders(true);
+                    coordinator.uploaders--;
                     removedCount++;
                     
                     // Put it at the back of the list
@@ -191,8 +176,7 @@ class PeerCheckerTask implements Runnable
                         _log.debug("Choke uninteresting peer: " + peer);
                     peer.setChoking(true);
                     uploaders--;
-                    interestedUploaders--;
-                    coordinator.decrementUploaders(true);
+                    coordinator.uploaders--;
                     removedCount++;
                     
                     // Put it at the back of the list
@@ -207,8 +191,7 @@ class PeerCheckerTask implements Runnable
                         _log.debug("Choke downloader that doesn't deliver: " + peer);
                     peer.setChoking(true);
                     uploaders--;
-                    interestedUploaders--;
-                    coordinator.decrementUploaders(true);
+                    coordinator.uploaders--;
                     removedCount++;
                     
                     // Put it at the back of the list
@@ -229,30 +212,26 @@ class PeerCheckerTask implements Runnable
                   }
               }
             peer.retransmitRequests();
-            // send PEX, about every 12 minutes
-            if (((_runCount + i) % 17) == 0 && !peer.isCompleted())
+            // send PEX
+            if ((_runCount % 17) == 0 && !peer.isCompleted())
                 coordinator.sendPeers(peer);
-            // send Comment Request, about every 30 minutes
-            if (fetchComments && ((_runCount + i) % 47) == 0)
-                coordinator.sendCommentReq(peer);
             // cheap failsafe for seeds connected to seeds, stop pinging and hopefully
             // the inactive checker (above) will eventually disconnect it
             if (coordinator.getNeededLength() > 0 || !peer.isCompleted())
                 peer.keepAlive();
             // announce them to local tracker (TrackerClient does this too)
             if (dht != null && (_runCount % 5) == 0) {
-                dht.announce(coordinator.getInfoHash(), peer.getPeerID().getDestHash(),
-                             peer.isCompleted());
+                dht.announce(coordinator.getInfoHash(), peer.getPeerID().getDestHash());
             }
-        } // for peer
+          }
 
         // Resync actual uploaders value
         // (can shift a bit by disconnecting peers)
-        coordinator.setUploaders(uploaders, interestedUploaders);
+        coordinator.uploaders = uploaders;
 
         // Remove the worst downloader if needed. (uploader if seeding)
         if (((uploaders == uploadLimit
-            && coordinator.getInterestedAndChoking() > 0)
+            && coordinator.interestedAndChoking > 0)
             || uploaders > uploadLimit)
             && worstDownloader != null)
           {
@@ -260,60 +239,38 @@ class PeerCheckerTask implements Runnable
                 _log.debug("Choke worst downloader: " + worstDownloader);
 
             worstDownloader.setChoking(true);
-            coordinator.decrementUploaders(worstDownloader.isInterested());
+            coordinator.uploaders--;
             removedCount++;
 
             // Put it at the back of the list
             removed.add(worstDownloader);
           }
         
-        boolean coordOver = coordinator.overUpBWLimit(uploaded);
+        // Optimistically unchoke a peer
+        if ((!overBWLimit) && !coordinator.overUpBWLimit(uploaded))
+            coordinator.unchokePeer();
+
+        // Put peers back at the end of the list that we removed earlier.
         synchronized (coordinator.peers) {
-            if ((!overBWLimit) && !coordOver) {
-                // Optimistically unchoke a peer
-                // must be called inside synch
-                coordinator.unchokePeer();
-            }
-            // Put peers back at the end of the list that we removed earlier.
             for(Peer peer : removed) { 
                 if (coordinator.peers.remove(peer))
                     coordinator.peers.add(peer);
             }
         }
-
-        coordinator.addInterestedAndChoking(removedCount);
+        coordinator.interestedAndChoking += removedCount;
 
 	// store the rates
 	coordinator.setRateHistory(uploaded, downloaded);
-        if (_log.shouldLog(Log.DEBUG))
-            _log.debug("END peers: " + peerList.size() + " uploaders: " + uploaders +
-                       " interested: " + interestedUploaders);
 
         // close out unused files, but we don't need to do it every time
         Storage storage = coordinator.getStorage();
-        if (storage != null) {
-            // The more files a torrent has, the more often we call the cleaner,
-            // to keep from running out of FDs
-            int files = storage.getFileCount();
-            int skip;
-            if (files == 1)
-                skip = 6;
-            else if (files <= 4)
-                skip = 4;
-            else if (files <= 20)
-                skip = 3;
-            else if (files <= 50)
-                skip = 2;
-            else
-                skip = 1;
-
-            if ((_runCount % skip) == 0)
+        if (storage != null && (_runCount % 4) == 0) {
                 storage.cleanRAFs();
         }
 
         // announce ourselves to local tracker (TrackerClient does this too)
         if (dht != null && (_runCount % 16) == 0) {
-            dht.announce(coordinator.getInfoHash(), coordinator.completed());
+            dht.announce(coordinator.getInfoHash());
         }
   }
 }

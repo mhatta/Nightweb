@@ -24,8 +24,6 @@ import java.util.List;
 
 import net.i2p.data.ByteArray;
 
-import org.klomp.snark.comments.Comment;
-
 /**
  * Listener for Peer events.
  */
@@ -217,18 +215,4 @@ interface PeerListener
    *  @since 0.9.2
    */
   public I2PSnarkUtil getUtil();
-
-  /**
-   * Called when comments are requested via ut_comment
-   *
-   * @since 0.9.31
-   */
-  public void gotCommentReq(Peer peer, int num);
-
-  /**
-   * Called when comments are received via ut_comment
-   *
-   * @since 0.9.31
-   */
-  public void gotComments(Peer peer, List<Comment> comments);
 }

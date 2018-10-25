@@ -21,7 +21,6 @@
 package org.klomp.snark.bencode;
 
 import java.io.EOFException;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
@@ -102,9 +101,9 @@ public class BDecoder
    * @return The first BEValue on the stream or null when the stream
    * has ended.
    *
-   * @throws InvalidBEncodingException when the stream doesn't start with a
+   * @exception InvalidBEncoding when the stream doesn't start with a
    * bencoded value or the stream isn't a bencoded stream at all.
-   * @throws IOException when somthing bad happens with the stream
+   * @exception IOException when somthing bad happens with the stream
    * to read from.
    */
   public static BEValue bdecode(InputStream in) throws IOException
@@ -233,8 +232,10 @@ public class BDecoder
 
     if (c == '-')
       {
-        chars.append((char)c);
         c = read();
+        if (c == '0')
+          throw new InvalidBEncodingException("Negative zero not allowed");
+        chars.append((char)c);
       }
 
     if (c < '1' || c > '9')
@@ -375,21 +376,4 @@ public class BDecoder
     return result;
   }
 
-  /**
-   *  prints out the decoded data
-   *  @since 0.9.14
-   */
-  public static void main(String[] args) {
-    if (args.length != 1) {
-        System.err.println("Usage: BDecoder file.torrent");
-        System.exit(1);
-    }
-    try {
-        BEValue bev = bdecode(new FileInputStream(args[0]));
-        System.out.println(bev.toString());
-    } catch (IOException ioe) {
-        ioe.printStackTrace();
-        System.exit(1);
-    }
-  }
 }

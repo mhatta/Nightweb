@@ -23,8 +23,8 @@ package org.klomp.snark;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
-import java.net.URISyntaxException;
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -36,9 +36,7 @@ import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
 
-import net.i2p.crypto.SigType;
 import net.i2p.data.DataHelper;
-import net.i2p.data.Destination;
 import net.i2p.data.Hash;
 import net.i2p.util.ConvertToHash;
 import net.i2p.util.I2PAppThread;
@@ -73,9 +71,8 @@ public class TrackerClient implements Runnable {
   private static final String COMPLETED_EVENT = "completed";
   private static final String STOPPED_EVENT = "stopped";
   private static final String NOT_REGISTERED  = "torrent not registered"; //bytemonsoon
-  private static final String NOT_REGISTERED_2  = "torrent not found";    // diftracker
-  private static final String NOT_REGISTERED_3  = "torrent unauthorised"; // vuze
-  private static final String ERROR_GOT_HTML  = "received html";             // fake return
+  /** this is our equivalent to router.utorrent.com for bootstrap */
+  private static final String DEFAULT_BACKUP_TRACKER = "http://tracker.welterde.i2p/a";
 
   private final static int SLEEP = 5; // 5 minutes.
   private final static int DELAY_MIN = 2000; // 2 secs.
@@ -85,13 +82,9 @@ public class TrackerClient implements Runnable {
   private final static int MAX_CONSEC_FAILS = 5;    // slow down after this
   private final static int LONG_SLEEP = 30*60*1000; // sleep a while after lots of fails
   private final static long MIN_TRACKER_ANNOUNCE_INTERVAL = 15*60*1000;
-  private final static long MIN_DHT_ANNOUNCE_INTERVAL = 39*60*1000;
-  /** No guidance in BEP 5; standard practice is K (=8) */
-  private static final int DHT_ANNOUNCE_PEERS = 4;
+  private final static long MIN_DHT_ANNOUNCE_INTERVAL = 10*60*1000;
   public static final int PORT = 6881;
-  private static final int MAX_TRACKERS = 12;
-  // tracker.welterde.i2p
-  private static final Hash DSA_ONLY_TRACKER = ConvertToHash.getHash("cfmqlafjfmgkzbt4r3jsfyhgsr5abgxryl6fnz3d3y5a365di5aa.b32.i2p");
+  public static final boolean DHT_ONLY = true;
 
   private final I2PSnarkUtil _util;
   private final MetaInfo meta;
@@ -114,8 +107,6 @@ public class TrackerClient implements Runnable {
   // these 2 used in loop()
   private volatile boolean runStarted;
   private volatile  int consecutiveFails;
-  // if we don't want anything else.
-  // Not necessarily seeding, as we may have skipped some files.
   private boolean completed;
   private volatile boolean _fastUnannounce;
   private long lastDHTAnnounce;
@@ -160,7 +151,6 @@ public class TrackerClient implements Runnable {
       consecutiveFails = 0;
       runStarted = false;
       _fastUnannounce = false;
-      snark.setTrackerProblems(null);
       _thread = new I2PAppThread(this, _threadName + " #" + (++_runCount), true);
       _thread.start();
       started = true;
@@ -299,7 +289,6 @@ public class TrackerClient implements Runnable {
     }
 
     // announce list
-    // We completely ignore the BEP 12 processing rules
     if (meta != null && !meta.isPrivate()) {
         List<List<String>> list = meta.getAnnounceList();
         if (list != null) {
@@ -311,12 +300,6 @@ public class TrackerClient implements Runnable {
                     if (_log.shouldLog(Log.DEBUG))
                         _log.debug("Additional announce (list): [" + url + "] for infoHash: " + infoHash);
                 }
-            }
-            if (trackers.size() > 2) {
-                // shuffle everything but the primary
-                TCTracker pri = trackers.remove(0);
-                Collections.shuffle(trackers, _util.getContext().random());
-                trackers.add(0, pri);
             }
         }
     }
@@ -347,9 +330,7 @@ public class TrackerClient implements Runnable {
                 _log.debug("Backup announce: [" + url + "] for infoHash: " + infoHash);
         }
         if (backupTrackers.isEmpty()) {
-            backupTrackers.add(new TCTracker(SnarkManager.DEFAULT_BACKUP_TRACKER, false));
-        } else if (trackers.size() > 1) {
-            Collections.shuffle(backupTrackers, _util.getContext().random());
+            backupTrackers.add(new TCTracker(DEFAULT_BACKUP_TRACKER, false));
         }
     }
     this.completed = coordinator.getLeft() == 0;
@@ -365,23 +346,8 @@ public class TrackerClient implements Runnable {
   private boolean isNewValidTracker(Set<Hash> existing, String ann) {
       Hash h = getHostHash(ann);
       if (h == null) {
-          if (_log.shouldLog(Log.WARN))
-              _log.warn("Bad announce URL: [" + ann + ']');
-          return false;
-      }
-      // comment this out if tracker.welterde.i2p upgrades
-      if (h.equals(DSA_ONLY_TRACKER)) {
-          Destination dest = _util.getMyDestination();
-          if (dest != null && dest.getSigType() != SigType.DSA_SHA1) {
-              if (_log.shouldLog(Log.WARN))
-                  _log.warn("Skipping incompatible tracker: " + ann);
-              return false;
-          }
-      }
-      if (existing.size() >= MAX_TRACKERS) {
-          if (_log.shouldLog(Log.INFO))
-              _log.info("Not using announce URL, we have enough: [" + ann + ']');
-          return false;
+         _log.error("Bad announce URL: [" + ann + ']');
+         return false;
       }
       boolean rv = existing.add(h);
       if (!rv) {
@@ -410,7 +376,7 @@ public class TrackerClient implements Runnable {
             // Local DHT tracker announce
             DHT dht = _util.getDHT();
             if (dht != null && (meta == null || !meta.isPrivate()))
-                dht.announce(snark.getInfoHash(), coordinator.completed());
+                dht.announce(snark.getInfoHash());
 
             int oldSeenPeers = snark.getTrackerSeenPeers();
             int maxSeenPeers = 0;
@@ -483,6 +449,10 @@ public class TrackerClient implements Runnable {
    *  @return max peers seen
    */
   private int getPeersFromTrackers(List<TCTracker> trckrs) {
+            if (DHT_ONLY) {
+                return 0;
+            }
+
             long left = coordinator.getLeft();   // -1 in magnet mode
             
             // First time we got a complete download?
@@ -542,9 +512,9 @@ public class TrackerClient implements Runnable {
                         !snark.isChecking() &&
                         info.getSeedCount() > 100 &&
                         coordinator.getPeerCount() <= 0 &&
-                        _util.getContext().clock().now() > _startedOn + 30*60*1000 &&
+                        _util.getContext().clock().now() > _startedOn + 2*60*60*1000 &&
                         snark.getTotalLength() > 0 &&
-                        uploaded >= snark.getTotalLength() / 2) {
+                        uploaded >= snark.getTotalLength() * 3 / 2) {
                         if (_log.shouldLog(Log.WARN))
                             _log.warn("Auto stopping " + snark.getBaseName());
                         snark.setAutoStoppable(false);
@@ -558,8 +528,7 @@ public class TrackerClient implements Runnable {
                     DHT dht = _util.getDHT();
                     if (dht != null) {
                         for (Peer peer : peers) {
-                            dht.announce(snark.getInfoHash(), peer.getPeerID().getDestHash(),
-                                         false);  // TODO actual seed/leech status
+                            dht.announce(snark.getInfoHash(), peer.getPeerID().getDestHash());
                         }
                     }
 
@@ -585,28 +554,20 @@ public class TrackerClient implements Runnable {
                   {
                     // Probably not fatal (if it doesn't last to long...)
                     if (_log.shouldLog(Log.WARN))
-                        _log.warn("Could not contact tracker at '" + tr.announce + "': " + ioe);
+                        _log.warn
+                      ("WARNING: Could not contact tracker at '"
+                       + tr.announce + "': " + ioe);
                     tr.trackerProblems = ioe.getMessage();
                     // don't show secondary tracker problems to the user
-                    // ... and only if we don't have any peers at all. Otherwise, PEX/DHT will save us.
-                    if (tr.isPrimary && coordinator.getPeers() <= 0 &&
-                        (!completed || _util.getDHT() == null || _util.getDHT().size() <= 0))
+                    if (tr.isPrimary)
                       snark.setTrackerProblems(tr.trackerProblems);
-                    String tplc = tr.trackerProblems.toLowerCase(Locale.US);
-                    if (tplc.startsWith(NOT_REGISTERED) || tplc.startsWith(NOT_REGISTERED_2) ||
-                        tplc.startsWith(NOT_REGISTERED_3) || tplc.startsWith(ERROR_GOT_HTML)) {
+                    if (tr.trackerProblems.toLowerCase(Locale.US).startsWith(NOT_REGISTERED)) {
                       // Give a guy some time to register it if using opentrackers too
                       //if (trckrs.size() == 1) {
                       //  stop = true;
                       //  snark.stopTorrent();
                       //} else { // hopefully each on the opentrackers list is really open
-                        if (tr.registerFails++ > MAX_REGISTER_FAILS ||
-                            !completed ||              // no use retrying if we aren't seeding
-                            tplc.startsWith(ERROR_GOT_HTML) ||   // fake msg from doRequest()
-                            (!tr.isPrimary && tr.registerFails > MAX_REGISTER_FAILS / 2))
-                          if (_log.shouldLog(Log.WARN))
-                              _log.warn("Not longer announcing to " + tr.announce + " : " +
-                                        tr.trackerProblems + " after " + tr.registerFails + " failures");
+                        if (tr.registerFails++ > MAX_REGISTER_FAILS)
                           tr.stop = true;
                       //
                     }
@@ -632,6 +593,10 @@ public class TrackerClient implements Runnable {
    *  @return max peers seen
    */
   private int getPeersFromPEX() {
+            if (DHT_ONLY) {
+                return 0;
+            }
+
             // Get peers from PEX
             int rv = 0;
             if (coordinator.needOutboundPeers() && (meta == null || !meta.isPrivate()) && !stop) {
@@ -680,9 +645,7 @@ public class TrackerClient implements Runnable {
                     numwant = 1;
                 else
                     numwant = _util.getMaxConnections();
-                Collection<Hash> hashes = dht.getPeersAndAnnounce(snark.getInfoHash(), numwant,
-                                                                  5*60*1000, DHT_ANNOUNCE_PEERS, 3*60*1000,
-                                                                  coordinator.completed(), numwant <= 1);
+                Collection<Hash> hashes = dht.getPeersAndAnnounce(snark.getInfoHash(), numwant, 5*60*1000, 1, 3*60*1000);
                 if (!hashes.isEmpty()) {
                     runStarted = true;
                     lastDHTAnnounce = _util.getContext().clock().now();
@@ -780,11 +743,6 @@ public class TrackerClient implements Runnable {
      }
   }
   
-  /**
-   *
-   *  Note: IOException message text gets displayed in the UI
-   *
-   */
   private TrackerInfo doRequest(TCTracker tr, String infoHash,
                                 String peerID, long uploaded,
                                 long downloaded, long left, String event)
@@ -824,26 +782,21 @@ public class TrackerClient implements Runnable {
     tr.lastRequestTime = System.currentTimeMillis();
     // Don't wait for a response to stopped when shutting down
     boolean fast = _fastUnannounce && event.equals(STOPPED_EVENT);
-    byte[] fetched = _util.get(s, true, fast ? -1 : 0, small ? 128 : 1024, small ? 1024 : 32*1024);
-    if (fetched == null)
-        throw new IOException("No response from " + tr.host);
-    if (fetched.length == 0)
-        throw new IOException("No data from " + tr.host);
-    // The HTML check only works if we didn't exceed the maxium fetch size specified in get(),
-    // otherwise we already threw an IOE.
-    if (fetched[0] == '<')
-        throw new IOException(ERROR_GOT_HTML + " from " + tr.host);
+    byte[] fetched = _util.get(s, true, fast ? -1 : 0, small ? 128 : 1024, small ? 1024 : 8*1024);
+    if (fetched == null) {
+        throw new IOException("Error fetching " + s);
+    }
     
         InputStream in = new ByteArrayInputStream(fetched);
 
         TrackerInfo info = new TrackerInfo(in, snark.getID(),
                                            snark.getInfoHash(), snark.getMetaInfo(), _util);
         if (_log.shouldLog(Log.INFO))
-            _log.info("TrackerClient " + tr.host + " response: " + info);
+            _log.info("TrackerClient response: " + info);
 
         String failure = info.getFailureReason();
         if (failure != null)
-            throw new IOException("Tracker " + tr.host + " responded with: " + failure);
+          throw new IOException(failure);
 
         tr.interval = Math.max(MIN_TRACKER_ANNOUNCE_INTERVAL, info.getInterval() * 1000l);
         return info;
@@ -880,57 +833,45 @@ public class TrackerClient implements Runnable {
   }
 
   /**
-   *  @param ann an announce URL, may be null, returns false if null
+   *  @param ann an announce URL
    *  @return true for i2p hosts only
    *  @since 0.7.12
    */
   public static boolean isValidAnnounce(String ann) {
-    if (ann == null)
-        return false;
-    URI url;
+    URL url;
     try {
-        url = new URI(ann);
-    } catch (URISyntaxException use) {
-        return false;
+       url = new URL(ann);
+    } catch (MalformedURLException mue) {
+       return false;
     }
-    String path = url.getPath();
-    if (path == null || !path.startsWith("/"))
-        return false;
-    return "http".equals(url.getScheme()) && url.getHost() != null &&
-           (url.getHost().endsWith(".i2p") || url.getHost().equals("i2p"));
+    return url.getProtocol().equals("http") &&
+           (url.getHost().endsWith(".i2p") || url.getHost().equals("i2p")) &&
+           url.getPort() < 0;
   }
 
   /**
-   *  This also validates the URL.
-   *
    *  @param ann an announce URL non-null
    *  @return a Hash for i2p hosts only, null otherwise
    *  @since 0.9.5
    */
   private static Hash getHostHash(String ann) {
-    URI url;
+    URL url;
     try {
-        url = new URI(ann);
-    } catch (URISyntaxException use) {
+        url = new URL(ann);
+    } catch (MalformedURLException mue) {
         return null;
     }
-    if (!"http".equals(url.getScheme()))
+    if (url.getPort() >= 0 || !url.getProtocol().equals("http"))
         return null;
     String host = url.getHost();
-    if (host == null)
-        return null;
-    if (host.endsWith(".i2p")) {
-        String path = url.getPath();
-        if (path == null || !path.startsWith("/"))
-            return null;
+    if (host.endsWith(".i2p"))
         return ConvertToHash.getHash(host);
-    }
     if (host.equals("i2p")) {
         String path = url.getPath();
         if (path == null || path.length() < 517 ||
             !path.startsWith("/"))
             return null;
-        String[] parts = DataHelper.split(path.substring(1), "[/\\?&;]", 2);
+        String[] parts = path.substring(1).split("/?&;", 2);
         return ConvertToHash.getHash(parts[0]);
     }
     return null;
@@ -939,7 +880,6 @@ public class TrackerClient implements Runnable {
   private static class TCTracker
   {
       final String announce;
-      final String host;
       final boolean isPrimary;
       long interval;
       long lastRequestTime;
@@ -950,15 +890,9 @@ public class TrackerClient implements Runnable {
       int consecutiveFails;
       int seenPeers;
 
-      /**
-       *  @param a must be a valid http URL with a path
-       *  @param p true if primary
-       */
       public TCTracker(String a, boolean p)
       {
           announce = a;
-          String s = a.substring(7);
-          host = s.substring(0, s.indexOf('/'));
           isPrimary = p;
           interval = INITIAL_SLEEP;
       }

@@ -25,16 +25,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Deque;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import net.i2p.I2PAppContext;
 import net.i2p.data.ByteArray;
@@ -47,8 +45,6 @@ import net.i2p.util.SimpleTimer2;
 
 import org.klomp.snark.bencode.BEValue;
 import org.klomp.snark.bencode.InvalidBEncodingException;
-import org.klomp.snark.comments.Comment;
-import org.klomp.snark.comments.CommentSet;
 import org.klomp.snark.dht.DHT;
 
 /**
@@ -56,7 +52,7 @@ import org.klomp.snark.dht.DHT;
  */
 class PeerCoordinator implements PeerListener
 {
-  private final Log _log;
+  private final Log _log = I2PAppContext.getGlobalContext().logManager().getLog(PeerCoordinator.class);
 
   /**
    * External use by PeerMonitorTask only.
@@ -73,34 +69,26 @@ class PeerCoordinator implements PeerListener
 
   // package local for access by CheckDownLoadersTask
   final static long CHECK_PERIOD = 40*1000; // 40 seconds
-  final static int MAX_UPLOADERS = 8;
+  final static int MAX_UPLOADERS = 6;
   public static final long MAX_INACTIVE = 8*60*1000;
-  public static final long MAX_SEED_INACTIVE = 2*60*1000;
 
   /**
-   * Approximation of the number of current uploaders (unchoked peers),
-   * whether interested or not.
+   * Approximation of the number of current uploaders.
    * Resynced by PeerChecker once in a while.
+   * External use by PeerCheckerTask only.
    */
-  private final AtomicInteger uploaders = new AtomicInteger();
-
-  /**
-   * Approximation of the number of current uploaders (unchoked peers),
-   * that are interested.
-   * Resynced by PeerChecker once in a while.
-   */
-  private final AtomicInteger interestedUploaders = new AtomicInteger();
+  int uploaders;
 
   /**
    * External use by PeerCheckerTask only.
    */
-  private final AtomicInteger interestedAndChoking = new AtomicInteger();
+  int interestedAndChoking;
 
   // final static int MAX_DOWNLOADERS = MAX_CONNECTIONS;
   // int downloaders = 0;
 
-  private final AtomicLong uploaded = new AtomicLong();
-  private final AtomicLong downloaded = new AtomicLong();
+  private long uploaded;
+  private long downloaded;
   final static int RATE_DEPTH = 3; // make following arrays RATE_DEPTH long
   private final long uploaded_old[] = {-1,-1,-1};
   private final long downloaded_old[] = {-1,-1,-1};
@@ -110,7 +98,7 @@ class PeerCoordinator implements PeerListener
    * This is a Queue, not a Set, because PeerCheckerTask keeps things in order for choking/unchoking.
    * External use by PeerMonitorTask only.
    */
-  final Deque<Peer> peers;
+  final Queue<Peer> peers;
 
   /**
    * Peers we heard about via PEX
@@ -146,6 +134,9 @@ class PeerCoordinator implements PeerListener
   private final CoordinatorListener listener;
   private final I2PSnarkUtil _util;
   private final Random _random;
+
+  /** Maintain connections with peers even after the torrent has finished. */
+  private boolean persistent = false;
   
   /**
    *  @param metainfo null if in magnet mode
@@ -156,7 +147,6 @@ class PeerCoordinator implements PeerListener
   {
     _util = util;
     _random = util.getContext().random();
-    _log = util.getContext().logManager().getLog(PeerCoordinator.class);
     this.id = id;
     this.infohash = infohash;
     this.metainfo = metainfo;
@@ -167,7 +157,7 @@ class PeerCoordinator implements PeerListener
     wantedPieces = new ArrayList<Piece>();
     setWantedPieces();
     partialPieces = new ArrayList<PartialPiece>(getMaxConnections() + 1);
-    peers = new LinkedBlockingDeque<Peer>();
+    peers = new LinkedBlockingQueue<Peer>();
     magnetState = new MagnetState(infohash, metainfo);
     pexPeers = new ConcurrentHashSet<PeerID>();
 
@@ -291,15 +281,7 @@ class PeerCoordinator implements PeerListener
    */
   public long getUploaded()
   {
-    return uploaded.get();
-  }
-
-  /**
-   *  Sets the initial total of uploaded bytes of all peers (from a saved status)
-   *  @since 0.9.15
-   */
-  public void setUploaded(long up) {
-      uploaded.set(up);
+    return uploaded;
   }
 
   /**
@@ -307,7 +289,7 @@ class PeerCoordinator implements PeerListener
    */
   public long getDownloaded()
   {
-    return downloaded.get();
+    return downloaded;
   }
 
   /**
@@ -333,22 +315,16 @@ class PeerCoordinator implements PeerListener
    */
   public long getDownloadRate()
   {
-    if (halted)
-        return 0;
     return getRate(downloaded_old);
   }
 
   public long getUploadRate()
   {
-    if (halted)
-        return 0;
     return getRate(uploaded_old);
   }
 
   public long getCurrentUploadRate()
   {
-    if (halted)
-        return 0;
     // no need to synchronize, only one value
     long r = uploaded_old[0];
     if (r <= 0)
@@ -388,7 +364,7 @@ class PeerCoordinator implements PeerListener
 
   /**
    *  Inbound.
-   *  Not halted, peers &lt; max.
+   *  Not halted, peers < max.
    *  @since 0.9.1
    */
   public boolean needPeers()
@@ -398,13 +374,13 @@ class PeerCoordinator implements PeerListener
 
   /**
    *  Outbound.
-   *  Not halted, peers &lt; max, and need pieces.
+   *  Not halted, peers < max, and need pieces.
    *  @since 0.9.1
    */
   public boolean needOutboundPeers() {
         //return wantedBytes != 0 && needPeers();
         // minus two to make it a little easier for new peers to get in on large swarms
-        return wantedBytes != 0 &&
+        return (wantedBytes != 0 || persistent) &&
                !halted &&
                peers.size() < getMaxConnections() - 2 &&
                (storage == null || !storage.isChecking());
@@ -414,7 +390,7 @@ class PeerCoordinator implements PeerListener
    *  Formerly used to
    *  reduce max if huge pieces to keep from ooming when leeching
    *  but now we don't
-   *  @return usually I2PSnarkUtil.MAX_CONNECTIONS
+   *  @return usually 16	
    */
   private int getMaxConnections() {
     if (metainfo == null)
@@ -432,6 +408,14 @@ class PeerCoordinator implements PeerListener
     //if (size <= 1024*1024)
     //  return (max + max + 2) / 3;
     //return (max + 2) / 3;
+  }
+
+  public void setPersistent(boolean isPersistent) {
+    persistent = isPersistent;
+  }
+
+  public boolean getPersistent() {
+    return persistent;
   }
 
   public boolean halted() { return halted; }
@@ -497,7 +481,7 @@ class PeerCoordinator implements PeerListener
     synchronized(peers)
       {
         Peer old = peerIDInList(peer.getPeerID(), peers);
-        if (old != null && old.getInactiveTime() > old.getMaxInactiveTime()) {
+        if ( (old != null) && (old.getInactiveTime() > MAX_INACTIVE) ) {
             // idle for 8 minutes, kill the old con (32KB/8min = 68B/sec minimum for one block)
             if (_log.shouldLog(Log.WARN))
               _log.warn("Remomving old peer: " + peer + ": " + old + ", inactive for " + old.getInactiveTime());
@@ -541,10 +525,7 @@ class PeerCoordinator implements PeerListener
             // Can't add to beginning since we converted from a List to a Queue
             // We can do this in Java 6 with a Deque
             //peers.add(0, peer);
-            if (_util.getContext().random().nextInt(4) == 0)
-                peers.push(peer);
-            else
-                peers.add(peer);
+            peers.add(peer);
             peerCount = peers.size();
             unchokePeer();
 
@@ -593,10 +574,8 @@ class PeerCoordinator implements PeerListener
         // thus there is an additional check in connected()
         need_more = (!peer.isConnected()) && peersize < getMaxConnections();
         // Check if we already have this peer before we build the connection
-        if (need_more) {
-            Peer old = peerIDInList(peer.getPeerID(), peers);
-            need_more = old == null || old.getInactiveTime() > old.getMaxInactiveTime();
-        }
+        Peer old = peerIDInList(peer.getPeerID(), peers);
+        need_more = need_more && ((old == null) || (old.getInactiveTime() > MAX_INACTIVE));
       }
 
     if (need_more)
@@ -617,13 +596,11 @@ class PeerCoordinator implements PeerListener
             bitfield = storage.getBitField();
         else
             bitfield = null;
-        // if we aren't a seed but we don't want any more
-        final boolean partialComplete = wantedBytes == 0 && bitfield != null && !bitfield.complete();
         Runnable r = new Runnable()
           {
             public void run()
             {
-              peer.runConnection(_util, listener, bitfield, magnetState, partialComplete);
+              peer.runConnection(_util, listener, bitfield, magnetState);
             }
           };
         String threadName = "Snark peer " + peer.toString();
@@ -632,17 +609,16 @@ class PeerCoordinator implements PeerListener
       }
     if (_log.shouldLog(Log.DEBUG)) {
       if (peer.isConnected())
-        _log.debug("Add peer already connected: " + peer);
+        _log.info("Add peer already connected: " + peer);
       else
-        _log.debug("Connections: " + peersize + "/" + getMaxConnections()
+        _log.info("Connections: " + peersize + "/" + getMaxConnections()
                   + " not accepting extra peer: " + peer);
     }
     return false;
   }
 
-  /**
-   * (Optimistically) unchoke. Must be called with peers synchronized
-   */
+
+  // (Optimistically) unchoke. Should be called with peers synchronized
   void unchokePeer()
   {
     // linked list will contain all interested peers that we choke.
@@ -659,7 +635,7 @@ class PeerCoordinator implements PeerListener
             if (peer.isChoking() && peer.isInterested())
               {
                 count++;
-                if (uploaders.get() < maxUploaders)
+                if (uploaders < maxUploaders)
                   {
                     if (peer.isInteresting() && !peer.isChoked())
                       interested.add(unchokedCount++, peer);
@@ -669,22 +645,20 @@ class PeerCoordinator implements PeerListener
               }
           }
 
-        int up = uploaders.get();
-        while (up < maxUploaders && !interested.isEmpty())
+        while (uploaders < maxUploaders && !interested.isEmpty())
           {
             Peer peer = interested.remove(0);
             if (_log.shouldLog(Log.DEBUG))
               _log.debug("Unchoke: " + peer);
             peer.setChoking(false);
-            up = uploaders.incrementAndGet();
-            interestedUploaders.incrementAndGet();
+            uploaders++;
             count--;
             // Put peer back at the end of the list.
             peers.remove(peer);
             peers.add(peer);
             peerCount = peers.size();
           }
-        interestedAndChoking.set(count);
+        interestedAndChoking = count;
   }
 
   /**
@@ -725,7 +699,7 @@ class PeerCoordinator implements PeerListener
             }
         }
     }
-    return rv;
+    return rv || (wantedBytes == 0 && persistent);
   }
 
   /**
@@ -938,7 +912,6 @@ class PeerCoordinator implements PeerListener
    * Returns a byte array containing the requested piece or null of
    * the piece is unknown.
    *
-   * @return bytes or null for errors such as not having the piece yet
    * @throws RuntimeException on IOE getting the data
    */
   public ByteArray gotRequest(Peer peer, int piece, int off, int len)
@@ -970,7 +943,7 @@ class PeerCoordinator implements PeerListener
    */
   public void uploaded(Peer peer, int size)
   {
-    uploaded.addAndGet(size);
+    uploaded += size;
 
     //if (listener != null)
     //  listener.peerChange(this, peer);
@@ -981,7 +954,7 @@ class PeerCoordinator implements PeerListener
    */
   public void downloaded(Peer peer, int size)
   {
-    downloaded.addAndGet(size);
+    downloaded += size;
 
     //if (listener != null)
     //  listener.peerChange(this, peer);
@@ -1002,9 +975,8 @@ class PeerCoordinator implements PeerListener
     }
     int piece = pp.getPiece();
     
-    // try/catch outside the synch to avoid deadlock in the catch
-    try {
-      synchronized(wantedPieces) {
+    synchronized(wantedPieces)
+      {
         Piece p = new Piece(piece);
         if (!wantedPieces.contains(p))
           {
@@ -1020,7 +992,8 @@ class PeerCoordinator implements PeerListener
             }
           }
         
-          // try/catch moved outside of synch
+        try
+          {
             // this takes forever if complete, as it rechecks
             if (storage.putPiece(pp))
               {
@@ -1029,38 +1002,26 @@ class PeerCoordinator implements PeerListener
               }
             else
               {
-                // so we will try again
-                markUnrequested(peer, piece);
-                // just in case
-                removePartialPiece(piece);
                 // Oops. We didn't actually download this then... :(
-                downloaded.addAndGet(0 - metainfo.getPieceLength(piece));
-                // Mark this peer as not having the piece. PeerState will update its bitfield.
-                for (Piece pc : wantedPieces) {
-                    if (pc.getId() == piece) {
-                        pc.removePeer(peer);
-                        break;
-                    }
-                }
-                if (_log.shouldWarn())
-                    _log.warn("Got BAD piece " + piece + "/" + metainfo.getPieces() + " from " + peer + " for " + metainfo.getName());
+                downloaded -= metainfo.getPieceLength(piece);
+                _log.warn("Got BAD piece " + piece + "/" + metainfo.getPieces() + " from " + peer + " for " + metainfo.getName());
                 return false; // No need to announce BAD piece to peers.
               }
-
-        wantedPieces.remove(p);
-        wantedBytes -= metainfo.getPieceLength(p.getId());
-      }  // synch
-    } catch (IOException ioe) {
+          }
+        catch (IOException ioe)
+          {
             String msg = "Error writing storage (piece " + piece + ") for " + metainfo.getName() + ": " + ioe;
             _log.error(msg, ioe);
             if (listener != null) {
                 listener.addMessage(msg);
                 listener.addMessage("Fatal storage error: Stopping torrent " + metainfo.getName());
             }
-            // deadlock was here
             snark.stopTorrent();
             throw new RuntimeException(msg, ioe);
-    }
+          }
+        wantedPieces.remove(p);
+        wantedBytes -= metainfo.getPieceLength(p.getId());
+      }
 
     // just in case
     removePartialPiece(piece);
@@ -1081,8 +1042,10 @@ class PeerCoordinator implements PeerListener
     }
 
     if (done) {
-        for (Peer p : toDisconnect) {
-            p.disconnect(true);
+        if (!persistent) {
+            for (Peer p : toDisconnect) {
+                p.disconnect(true);
+            }
         }
     
         // put msg on the console if partial, since Storage won't do it
@@ -1114,12 +1077,11 @@ class PeerCoordinator implements PeerListener
   {
     if (interest)
       {
-            if (uploaders.get() < allowedUploaders())
+            if (uploaders < allowedUploaders())
               {
                 if(peer.isChoking())
                   {
-                    uploaders.incrementAndGet();
-                    interestedUploaders.incrementAndGet();
+                    uploaders++;
                     peer.setChoking(false);
                     if (_log.shouldLog(Log.INFO))
                         _log.info("Unchoke: " + peer);
@@ -1173,9 +1135,8 @@ class PeerCoordinator implements PeerListener
    *
    *  Also mark the piece unrequested if this peer was the only one.
    *
-   *  @param peer partials, must include the zero-offset (empty) ones too.
-   *              No dup pieces, piece.setDownloaded() must be set.
-   *              len field in Requests is ignored.
+   *  @param peer partials, must include the zero-offset (empty) ones too
+   *              No dup pieces, piece.setDownloaded() must be set
    *  @since 0.8.2
    */
   public void savePartialPieces(Peer peer, List<Request> partials)
@@ -1254,23 +1215,22 @@ class PeerCoordinator implements PeerListener
                  boolean skipped = false;
                  for(Piece piece : wantedPieces) {
                      if (piece.getId() == savedPiece) {
-                         if (peer.isCompleted() && piece.getPeerCount() > 1 &&
-                             wantedPieces.size() > 2*END_GAME_THRESHOLD) {
+                         if (peer.isCompleted() && piece.getPeerCount() > 1) {
                              // Try to preserve rarest-first
-                             // by not requesting a partial piece that at least two non-seeders also have
+                             // by not requesting a partial piece that non-seeders also have
                              // from a seeder
-                             int nonSeeds = 0;
+                             boolean nonSeeds = false;
                              for (Peer pr : peers) {
                                  PeerState state = pr.state;
                                  if (state == null) continue;
                                  BitField bf = state.bitfield;
                                  if (bf == null) continue;
                                  if (bf.get(savedPiece) && !pr.isCompleted()) {
-                                     if (++nonSeeds > 1)
-                                         break;
+                                     nonSeeds = true;
+                                     break;
                                  }
                              }
-                             if (nonSeeds > 1) {
+                             if (nonSeeds) {
                                  skipped = true;
                                  break;
                              }
@@ -1391,8 +1351,6 @@ class PeerCoordinator implements PeerListener
       } else if (id == ExtensionHandler.ID_HANDSHAKE) {
           sendPeers(peer);
           sendDHT(peer);
-          if (_util.utCommentsEnabled())
-              sendCommentReq(peer);
       }
   }
 
@@ -1438,35 +1396,6 @@ class PeerCoordinator implements PeerListener
       try {
           if (bev.getMap().get(ExtensionHandler.TYPE_DHT) != null)
               ExtensionHandler.sendDHT(peer, dht.getPort(), dht.getRPort());
-      } catch (InvalidBEncodingException ibee) {}
-  }
-
-  /**
-   *  Send a commment request message to the peer, if he supports it.
-   *  @since 0.9.31
-   */
-  void sendCommentReq(Peer peer) {
-      Map<String, BEValue> handshake = peer.getHandshakeMap();
-      if (handshake == null)
-          return;
-      BEValue bev = handshake.get("m");
-      if (bev == null)
-          return;
-      // TODO if peer hasn't been connected very long, don't bother
-      // unless forced at handshake time (see above)
-      try {
-          if (bev.getMap().get(ExtensionHandler.TYPE_COMMENT) != null) {
-              int sz = 0;
-              CommentSet comments = snark.getComments();
-              if (comments != null) {
-                  synchronized(comments) {
-                      sz = comments.size();
-                  }
-              }
-              if (sz >= CommentSet.MAX_SIZE)
-                  return;
-              ExtensionHandler.sendCommentReq(peer, CommentSet.MAX_SIZE - sz);
-          }
       } catch (InvalidBEncodingException ibee) {}
   }
 
@@ -1522,44 +1451,6 @@ class PeerCoordinator implements PeerListener
   }
 
   /**
-   * Called when comments are requested via ut_comment
-   *
-   * @since 0.9.31
-   */
-  public void gotCommentReq(Peer peer, int num) {
-      /* TODO cache per-torrent setting, use it instead */
-      if (!_util.utCommentsEnabled())
-          return;
-      CommentSet comments = snark.getComments();
-      if (comments != null) {
-          int lastSent = peer.getTotalCommentsSent();
-          int sz;
-          synchronized(comments) {
-              sz = comments.size();
-              // only send if we have more than last time
-              if (sz <= lastSent)
-                  return;
-              ExtensionHandler.locked_sendComments(peer, num, comments);
-          }
-          peer.setTotalCommentsSent(sz);
-      }
-  }
-
-  /**
-   * Called when comments are received via ut_comment
-   *
-   * @param comments non-null
-   * @since 0.9.31
-   */
-  public void gotComments(Peer peer, List<Comment> comments) {
-      /* TODO cache per-torrent setting, use it instead */
-      if (!_util.utCommentsEnabled())
-          return;
-      if (!comments.isEmpty())
-          snark.addComments(comments);
-  }
-
-  /**
    *  Called by TrackerClient
    *  @return the Set itself, modifiable, not a copy, caller should clear()
    *  @since 0.8.4
@@ -1573,102 +1464,22 @@ class PeerCoordinator implements PeerListener
    */
   public int allowedUploaders()
   {
-    int up = uploaders.get();
-    if (listener != null && listener.overUploadLimit(interestedUploaders.get())) {
-           if (_log.shouldLog(Log.DEBUG))
-             _log.debug("Over limit, uploaders was: " + up);
-        return up - 1;
-    } else if (up < MAX_UPLOADERS) {
-        return up + 1;
-    } else {
+    if (listener != null && listener.overUploadLimit(uploaders)) {
+        // if (_log.shouldLog(Log.DEBUG))
+        //   _log.debug("Over limit, uploaders was: " + uploaders);
+        return uploaders - 1;
+    } else if (uploaders < MAX_UPLOADERS)
+        return uploaders + 1;
+    else
         return MAX_UPLOADERS;
-    }
   }
 
   /**
-   *  Uploaders whether interested or not
-   *  Use this for per-torrent limits.
-   *
    *  @return current
    *  @since 0.8.4
    */
   public int getUploaders() {
-      int rv = uploaders.get();
-      if (rv > 0) {
-          int max = getPeers();
-          if (rv > max)
-              rv = max;
-      }
-      return rv;
-  }
-
-  /**
-   *  Uploaders, interested only.
-   *  Use this to calculate the global total, so that
-   *  unchoked but uninterested peers don't count against the global limit.
-   *
-   *  @return current
-   *  @since 0.9.28
-   */
-  public int getInterestedUploaders() {
-      int rv = interestedUploaders.get();
-      if (rv > 0) {
-          int max = getPeers();
-          if (rv > max)
-              rv = max;
-      }
-      return rv;
-  }
-
-  /**
-   *  Set the uploaders and interestedUploaders counts
-   *
-   *  @since 0.9.28
-   *  @param upl whether interested or not
-   *  @param inter interested only
-   */
-  public void setUploaders(int upl, int inter) {
-      if (upl < 0)
-          upl = 0;
-      else if (upl > MAX_UPLOADERS)
-          upl = MAX_UPLOADERS;
-      uploaders.set(upl);
-      if (inter < 0)
-          inter = 0;
-      else if (inter > MAX_UPLOADERS)
-          inter = MAX_UPLOADERS;
-      interestedUploaders.set(inter);
-  }
-
-  /**
-   *  Decrement the uploaders and (if set) the interestedUploaders counts
-   *
-   *  @since 0.9.28
-   */
-  public void decrementUploaders(boolean isInterested) {
-      int up = uploaders.decrementAndGet();
-      if (up < 0)
-          uploaders.set(0);
-      if (isInterested) {
-          up = interestedUploaders.decrementAndGet();
-          if (up < 0)
-              interestedUploaders.set(0);
-      }
-  }
-
-  /**
-   *  @return current
-   *  @since 0.9.28
-   */
-  public int getInterestedAndChoking() {
-      return interestedAndChoking.get();
-  }
-
-  /**
-   *  @since 0.9.28
-   */
-  public void addInterestedAndChoking(int toAdd) {
-      interestedAndChoking.addAndGet(toAdd);
+      return uploaders;
   }
 
   public boolean overUpBWLimit()

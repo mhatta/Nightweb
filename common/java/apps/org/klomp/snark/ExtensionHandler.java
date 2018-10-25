@@ -14,8 +14,6 @@ import net.i2p.util.Log;
 import org.klomp.snark.bencode.BDecoder;
 import org.klomp.snark.bencode.BEncoder;
 import org.klomp.snark.bencode.BEValue;
-import org.klomp.snark.comments.Comment;
-import org.klomp.snark.comments.CommentSet;
 
 /**
  * REF: BEP 10 Extension Protocol
@@ -33,11 +31,7 @@ abstract class ExtensionHandler {
     public static final int ID_DHT = 3;
     /** not using the option bit since the compact format is different */
     public static final String TYPE_DHT = "i2p_dht";
-    /** @since 0.9.31 */
-    public static final int ID_COMMENT = 4;
-    /** @since 0.9.31 */
-    public static final String TYPE_COMMENT = "ut_comment";
-    /** Pieces * SHA1 Hash length, + 25% extra for file names, bencoding overhead, etc */
+    /** Pieces * SHA1 Hash length, + 25% extra for file names, benconding overhead, etc */
     private static final int MAX_METADATA_SIZE = Storage.MAX_PIECES * 20 * 5 / 4;
     private static final int PARALLEL_REQUESTS = 3;
 
@@ -46,10 +40,9 @@ abstract class ExtensionHandler {
    *  @param metasize -1 if unknown
    *  @param pexAndMetadata advertise these capabilities
    *  @param dht advertise DHT capability
-   *  @param comment advertise ut_comment capability
    *  @return bencoded outgoing handshake message
    */
-    public static byte[] getHandshake(int metasize, boolean pexAndMetadata, boolean dht, boolean uploadOnly, boolean comment) {
+    public static byte[] getHandshake(int metasize, boolean pexAndMetadata, boolean dht) {
         Map<String, Object> handshake = new HashMap<String, Object>();
         Map<String, Integer> m = new HashMap<String, Integer>();
         if (pexAndMetadata) {
@@ -61,17 +54,11 @@ abstract class ExtensionHandler {
         if (dht) {
             m.put(TYPE_DHT, Integer.valueOf(ID_DHT));
         }
-        if (comment) {
-            m.put(TYPE_COMMENT, Integer.valueOf(ID_COMMENT));
-        }
         // include the map even if empty so the far-end doesn't NPE
         handshake.put("m", m);
         handshake.put("p", Integer.valueOf(TrackerClient.PORT));
         handshake.put("v", "I2PSnark");
         handshake.put("reqq", Integer.valueOf(5));
-        // BEP 21
-        if (uploadOnly)
-            handshake.put("upload_only", Integer.valueOf(1));
         return BEncoder.bencode(handshake);
     }
 
@@ -87,8 +74,6 @@ abstract class ExtensionHandler {
             handlePEX(peer, listener, bs, log);
         else if (id == ID_DHT)
             handleDHT(peer, listener, bs, log);
-        else if (id == ID_COMMENT)
-            handleComment(peer, listener, bs, log);
         else if (log.shouldLog(Log.INFO))
             log.info("Unknown extension msg " + id + " from " + peer);
     }
@@ -105,20 +90,17 @@ abstract class ExtensionHandler {
             peer.setHandshakeMap(map);
             Map<String, BEValue> msgmap = map.get("m").getMap();
 
-            if (log.shouldLog(Log.DEBUG))
-                log.debug("Peer " + peer + " supports extensions: " + msgmap.keySet());
+            if (msgmap.get(TYPE_PEX) != null) {
+                if (log.shouldLog(Log.DEBUG))
+                    log.debug("Peer supports PEX extension: " + peer);
+                // peer state calls peer listener calls sendPEX()
+            }
 
-            //if (msgmap.get(TYPE_PEX) != null) {
-            //    if (log.shouldLog(Log.DEBUG))
-            //        log.debug("Peer supports PEX extension: " + peer);
-            //    // peer state calls peer listener calls sendPEX()
-            //}
-
-            //if (msgmap.get(TYPE_DHT) != null) {
-            //    if (log.shouldLog(Log.DEBUG))
-            //        log.debug("Peer supports DHT extension: " + peer);
-            //    // peer state calls peer listener calls sendDHT()
-            //}
+            if (msgmap.get(TYPE_DHT) != null) {
+                if (log.shouldLog(Log.DEBUG))
+                    log.debug("Peer supports DHT extension: " + peer);
+                // peer state calls peer listener calls sendDHT()
+            }
 
             MagnetState state = peer.getMagnetState();
 
@@ -222,31 +204,30 @@ abstract class ExtensionHandler {
                 if (log.shouldLog(Log.DEBUG))
                     log.debug("Got request for " + piece + " from: " + peer);
                 byte[] pc;
-                int totalSize;
                 synchronized(state) {
                     pc = state.getChunk(piece);
-                    totalSize = state.getSize();
                 }
-                sendPiece(peer, piece, pc, totalSize);
+                sendPiece(peer, piece, pc);
                 // Do this here because PeerConnectionOut only reports for PIECE messages
                 peer.uploaded(pc.length);
                 listener.uploaded(peer, pc.length);
             } else if (type == TYPE_DATA) {
-                // On close reading of BEP 9, this is the total metadata size.
-                // Prior to 0.9.21, we sent the piece size, so we can't count on it.
-                // just ignore it. The actual length will be verified in saveChunk()
-                //int size = map.get("total_size").getInt();
-                //if (log.shouldLog(Log.DEBUG))
-                //    log.debug("Got data for " + piece + " length " + size + " from: " + peer);
+                int size = map.get("total_size").getInt();
+                if (log.shouldLog(Log.DEBUG))
+                    log.debug("Got data for " + piece + " length " + size + " from: " + peer);
                 boolean done;
                 int chk = -1;
                 synchronized(state) {
                     if (state.isComplete())
                         return;
                     int len = is.available();
+                    if (len != size) {
+                        // probably fatal
+                        if (log.shouldLog(Log.WARN))
+                            log.warn("total_size " + size + " but avail data " + len);
+                    }
                     peer.downloaded(len);
                     listener.downloaded(peer, len);
-                    // this checks the size
                     done = state.saveChunk(piece, bs, bs.length - len, len);
                     if (log.shouldLog(Log.INFO))
                         log.info("Got chunk " + piece + " from " + peer);
@@ -309,15 +290,11 @@ abstract class ExtensionHandler {
         }
     }
 
-    private static void sendPiece(Peer peer, int piece, byte[] data, int totalSize) {
+    private static void sendPiece(Peer peer, int piece, byte[] data) {
         Map<String, Object> map = new HashMap<String, Object>();
         map.put("msg_type", Integer.valueOf(TYPE_DATA));
         map.put("piece", Integer.valueOf(piece));
-        // BEP 9
-        // "This key has the same semantics as the 'metadata_size' in the extension header"
-        // which apparently means the same value. Fixed in 0.9.21.
-        //map.put("total_size", Integer.valueOf(data.length));
-        map.put("total_size", Integer.valueOf(totalSize));
+        map.put("total_size", Integer.valueOf(data.length));
         byte[] dict = BEncoder.bencode(map);
         byte[] payload = new byte[dict.length + data.length];
         System.arraycopy(dict, 0, payload, 0, dict.length);
@@ -440,116 +417,6 @@ abstract class ExtensionHandler {
             // NPE, no DHT caps
             //if (log.shouldLog(Log.INFO))
             //    log.info("DHT msg exception to " + peer, e);
-        }
-    }
-
-    /**
-     * Handle comment request and response
-     *
-     * Ref: https://blinkenlights.ch/ccms/software/bittorrent.html
-     * Ref: https://github.com/adrian-bl/bitflu/blob/3cb7fe887dbdea8132e4fa36fbbf5f26cf992db3/plugins/Bitflu/20_DownloadBitTorrent.pm#L3403
-     * @since 0.9.31
-     */
-    private static void handleComment(Peer peer, PeerListener listener, byte[] bs, Log log) {
-        if (log.shouldLog(Log.DEBUG))
-            log.debug("Got comment msg from " + peer);
-        try {
-            InputStream is = new ByteArrayInputStream(bs);
-            BDecoder dec = new BDecoder(is);
-            BEValue bev = dec.bdecodeMap();
-            Map<String, BEValue> map = bev.getMap();
-            int type = map.get("msg_type").getInt();
-            if (type == 0) {
-                // request
-                int num = 20;
-                BEValue b = map.get("num");
-                if (b != null)
-                    num = b.getInt();
-                listener.gotCommentReq(peer, num);
-            } else if (type == 1) {
-                // response
-                List<BEValue> list = map.get("comments").getList();
-                if (list.isEmpty())
-                    return;
-                List<Comment> comments = new ArrayList<Comment>(list.size());
-                long now = I2PAppContext.getGlobalContext().clock().now();
-                for (BEValue li : list) {
-                     Map<String, BEValue> m = li.getMap();
-                     String owner = m.get("owner").getString();
-                     String text = m.get("text").getString();
-                     // 0-5 range for rating is enforced by Comment constructor
-                     int rating = m.get("like").getInt();
-                     long time = now - (Math.max(0, m.get("timestamp").getInt()) * 1000L);
-                     Comment c = new Comment(text, owner, rating, time, false);
-                     comments.add(c);
-                }
-                listener.gotComments(peer, comments);
-            } else {
-                if (log.shouldLog(Log.INFO))
-                    log.info("Unknown comment msg type " + type + " from " + peer);
-            }
-        } catch (Exception e) {
-            if (log.shouldLog(Log.INFO))
-                log.info("Comment msg exception from " + peer, e);
-            //peer.disconnect(false);
-        }
-    }
-
-    private static final byte[] COMMENTS_FILTER = new byte[64];
-
-    /**
-     *  Send comment request
-     *  @since 0.9.31
-     */
-    public static void sendCommentReq(Peer peer, int num) {
-        Map<String, Object> map = new HashMap<String, Object>();
-        map.put("msg_type", Integer.valueOf(0));
-        map.put("num", Integer.valueOf(num));
-        map.put("filter", COMMENTS_FILTER);
-        byte[] payload = BEncoder.bencode(map);
-        try {
-            int hisMsgCode = peer.getHandshakeMap().get("m").getMap().get(TYPE_COMMENT).getInt();
-            peer.sendExtension(hisMsgCode, payload);
-        } catch (Exception e) {
-            // NPE, no caps
-        }
-    }
-
-    /**
-     *  Send comments
-     *  Caller must sync on comments
-     *  @param num max to send
-     *  @param comments non-null
-     *  @since 0.9.31
-     */
-    public static void locked_sendComments(Peer peer, int num, CommentSet comments) {
-        int toSend = Math.min(num, comments.size());
-        if (toSend <= 0)
-            return;
-        Map<String, Object> map = new HashMap<String, Object>();
-        map.put("msg_type", Integer.valueOf(1));
-        List<Object> lc = new ArrayList<Object>(toSend);
-        long now = I2PAppContext.getGlobalContext().clock().now();
-        int i = 0;
-        for (Comment c : comments) {
-            if (i++ >= toSend)
-                break;
-            Map<String, Object> mc = new HashMap<String, Object>();
-            String s = c.getName();
-            mc.put("owner", s != null ? s : "");
-            s = c.getText();
-            mc.put("text", s != null ? s : "");
-            mc.put("like", Integer.valueOf(c.getRating()));
-            mc.put("timestamp", Long.valueOf((now - c.getTime()) / 1000L));
-            lc.add(mc);
-        }
-        map.put("comments", lc);
-        byte[] payload = BEncoder.bencode(map);
-        try {
-            int hisMsgCode = peer.getHandshakeMap().get("m").getMap().get(TYPE_COMMENT).getInt();
-            peer.sendExtension(hisMsgCode, payload);
-        } catch (Exception e) {
-            // NPE, no caps
         }
     }
 }

@@ -24,12 +24,13 @@ import net.i2p.util.RandomSource;
  * @author zzz
  */
 
-class NodeInfo extends SimpleDataStructure {
+public class NodeInfo extends SimpleDataStructure {
 
     private final NID nID;
     private final Hash hash;
     private Destination dest;
     private final int port;
+    private boolean permanent = false;
 
     public static final int LENGTH = NID.HASH_LENGTH + Hash.HASH_LENGTH + 2;
 
@@ -77,7 +78,7 @@ class NodeInfo extends SimpleDataStructure {
      * @param compactInfo 20 byte node ID, 32 byte destHash, 2 byte port
      * @param offset starting at this offset in compactInfo
      * @throws IllegalArgumentException
-     * @throws ArrayIndexOutOfBoundsException
+     * @throws AIOOBE
      */
     public NodeInfo(byte[] compactInfo, int offset) {
         super();
@@ -102,15 +103,15 @@ class NodeInfo extends SimpleDataStructure {
      */
     public NodeInfo(String s) throws DataFormatException {
         super();
-        String[] parts = DataHelper.split(s, ":", 4);
+        String[] parts = s.split(":", 4);
         if (parts.length != 4)
             throw new DataFormatException("Bad format");
         byte[] nid = Base64.decode(parts[0]);
-        if (nid == null || nid.length != NID.HASH_LENGTH)
+        if (nid == null)
             throw new DataFormatException("Bad NID");
         nID = new NID(nid);
         byte[] h = Base64.decode(parts[1]);
-        if (h == null || h.length != Hash.HASH_LENGTH)
+        if (h == null)
             throw new DataFormatException("Bad hash");
         //hash = new Hash(h);
         hash = Hash.create(h);
@@ -206,6 +207,14 @@ class NodeInfo extends SimpleDataStructure {
         this.dest = dest;
     }
 
+    public void setPermanent(boolean isPermanent) {
+        permanent = isPermanent;
+    }
+
+    public boolean getPermanent() {
+        return permanent;
+    }
+
     public int getPort() {
         return this.port;
     }
@@ -225,7 +234,7 @@ class NodeInfo extends SimpleDataStructure {
             NodeInfo ni = (NodeInfo) o;
             // assume dest matches, ignore it
             return this.hash.equals(ni.hash) && nID.equals(ni.nID) && port == ni.port;
-        } catch (RuntimeException e) {
+        } catch (Exception e) {
             return false;
         }
     }
