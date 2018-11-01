@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-	package="net.nightweb" android:versionCode="26" android:versionName="0.0.26">
+	package="net.nightweb" android:versionCode="27" android:versionName="0.0.27">
 
 	<uses-permission android:name="android.permission.INTERNET"/>
 	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 	<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
-	<uses-sdk android:minSdkVersion="15" />
+	<uses-sdk android:minSdkVersion="23" />
 
 	<application
 		android:icon="@drawable/ic_launcher"
