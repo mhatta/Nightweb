@@ -90,6 +90,7 @@ public class TrackerClient implements Runnable {
   private static final int DHT_ANNOUNCE_PEERS = 4;
   public static final int PORT = 6881;
   private static final int MAX_TRACKERS = 12;
+  private static final boolean DHT_ONLY = true;
   // tracker.welterde.i2p
   private static final Hash DSA_ONLY_TRACKER = ConvertToHash.getHash("cfmqlafjfmgkzbt4r3jsfyhgsr5abgxryl6fnz3d3y5a365di5aa.b32.i2p");
 
@@ -483,6 +484,10 @@ public class TrackerClient implements Runnable {
    *  @return max peers seen
    */
   private int getPeersFromTrackers(List<TCTracker> trckrs) {
+            if (DHT_ONLY) {
+	      return 0;
+            }
+      
             long left = coordinator.getLeft();   // -1 in magnet mode
             
             // First time we got a complete download?
@@ -632,6 +637,10 @@ public class TrackerClient implements Runnable {
    *  @return max peers seen
    */
   private int getPeersFromPEX() {
+            if (DHT_ONLY) {
+                return 0;
+            }
+
             // Get peers from PEX
             int rv = 0;
             if (coordinator.needOutboundPeers() && (meta == null || !meta.isPrivate()) && !stop) {

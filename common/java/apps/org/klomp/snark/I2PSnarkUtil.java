@@ -2,6 +2,7 @@ package org.klomp.snark;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.InputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -38,6 +39,8 @@ import net.i2p.util.Translate;
 
 import org.klomp.snark.dht.DHT;
 import org.klomp.snark.dht.KRPC;
+import org.klomp.snark.dht.NodeInfo;
+import org.klomp.snark.dht.CustomQueryHandler;
 
 /**
  * I2P specific helpers for I2PSnark
@@ -74,7 +77,11 @@ public class I2PSnarkUtil {
     private List<String> _openTrackers;
     private DHT _dht;
     private long _startedTime;
-
+    private InputStream _myPrivateKeyStream;
+    private NodeInfo _myNodeInfo;
+    private CustomQueryHandler _customQueryHandler;
+    private Runnable _dhtInitCallback;
+    
     private static final int EEPGET_CONNECT_TIMEOUT = 45*1000;
     private static final int EEPGET_CONNECT_TIMEOUT_SHORT = 5*1000;
     public static final int DEFAULT_STARTUP_DELAY = 3;
@@ -190,6 +197,19 @@ public class I2PSnarkUtil {
 	_startupDelay = minutes;
 	_configured = true;
     }
+
+    public void setDHTNode(InputStream privateKeyStream, NodeInfo nodeInfo) {
+        _myPrivateKeyStream = privateKeyStream;
+        _myNodeInfo = nodeInfo;
+    }
+    
+    public void setDHTCustomQueryHandler(CustomQueryHandler handler) {
+        _customQueryHandler = handler;
+    }
+    
+    public void setDHTInitCallback(Runnable callback) {
+        _dhtInitCallback = callback;
+    }
     
     public String getI2CPHost() { return _i2cpHost; }
     public int getI2CPPort() { return _i2cpPort; }
@@ -267,14 +287,22 @@ public class I2PSnarkUtil {
                 opts.setProperty("i2p.streaming.answerPings", "false");
             if (opts.getProperty(I2PClient.PROP_SIGTYPE) == null)
                 opts.setProperty(I2PClient.PROP_SIGTYPE, "EdDSA_SHA512_Ed25519");
-            _manager = I2PSocketManagerFactory.createManager(_i2cpHost, _i2cpPort, opts);
-            if (_manager != null)
+            if (_myPrivateKeyStream != null) {
+                _manager = I2PSocketManagerFactory.createManager(_myPrivateKeyStream, _i2cpHost, _i2cpPort, opts);
+            } else {
+                _manager = I2PSocketManagerFactory.createManager(_i2cpHost, _i2cpPort, opts);
+            }
+	    if (_manager != null)
                 _startedTime = _context.clock().now();
             _connecting = false;
         }
-        if (_shouldUseDHT && _manager != null && _dht == null)
-            _dht = new KRPC(_context, _baseName, _manager.getSession());
-        return (_manager != null);
+	if (_shouldUseDHT && _manager != null && _dht == null) {
+	    _dht = new KRPC(_context, _baseName, _manager.getSession(), _myNodeInfo, _customQueryHandler);
+            if (_dhtInitCallback != null) {
+                _dhtInitCallback.run();
+            }
+        }
+	return (_manager != null);
     }
     
     /**
@@ -640,7 +668,10 @@ public class I2PSnarkUtil {
     public synchronized void setUseDHT(boolean yes) {
         _shouldUseDHT = yes;
         if (yes && _manager != null && _dht == null) {
-            _dht = new KRPC(_context, _baseName, _manager.getSession());
+            _dht = new KRPC(_context, _baseName, _manager.getSession(), _myNodeInfo, _customQueryHandler);
+            if (_dhtInitCallback != null) {
+                _dhtInitCallback.run();
+            }
         } else if (!yes && _dht != null) {
             _dht.stop();
             _dht = null;

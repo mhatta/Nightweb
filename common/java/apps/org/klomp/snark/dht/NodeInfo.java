@@ -24,13 +24,14 @@ import net.i2p.util.RandomSource;
  * @author zzz
  */
 
-class NodeInfo extends SimpleDataStructure {
+public class NodeInfo extends SimpleDataStructure {
 
     private final NID nID;
     private final Hash hash;
     private Destination dest;
     private final int port;
-
+    private boolean permanent = false;
+    
     public static final int LENGTH = NID.HASH_LENGTH + Hash.HASH_LENGTH + 2;
 
     /**
@@ -206,6 +207,14 @@ class NodeInfo extends SimpleDataStructure {
         this.dest = dest;
     }
 
+    public void setPermanent(boolean isPermanent) {
+        permanent = isPermanent;
+    }
+
+    public boolean getPermanent() {
+        return permanent;
+    }
+    
     public int getPort() {
         return this.port;
     }
