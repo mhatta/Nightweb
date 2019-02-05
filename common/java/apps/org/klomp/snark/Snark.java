@@ -741,7 +741,7 @@ public class Snark
         return storage;
     }
 
-    public String getDataDir() {
+    public File getDataDir() {
         return rootDataDir;
     }
     

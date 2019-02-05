@@ -1690,15 +1690,16 @@ public class SnarkManager implements CompleteListener, ClientApp {
      */
     public Snark addMagnet(String name, byte[] ih, String trackerURL, boolean updateStatus,
 			   boolean autoStart, File dataDir, CompleteListener listener) {
-	return addMagnet(name, ih, trackerURL, updateStatus, shouldAutoStart(), null, this, getDataDir().getPath());
+	return addMagnet(name, ih, trackerURL, updateStatus, shouldAutoStart(), this, getDataDir().getPath());
     }
 
     public Snark addMagnet(String name, byte[] ih, String trackerURL, boolean updateStatus,
-			   boolean autoStart, File dataDir, CompleteListener listener, File dataDir) {
-        String dirPath = dataDir != null ? dataDir.getAbsolutePath() : getDataDir().getPath();
+			   boolean autoStart, CompleteListener listener, String dataDir) {
+	/*        String dirPath = dataDir != null ? dataDir.getAbsolutePath() : getDataDir().getPath(); */
+	String dirPath = dataDir;
         Snark torrent = new Snark(_util, name, ih, trackerURL, listener,
                                   _peerCoordinatorSet, _connectionAcceptor,
-                                  dataDir);
+                                  dirPath);
 
         synchronized (_snarks) {
             Snark snark = getTorrentByInfoHash(ih);
@@ -1786,12 +1787,12 @@ public class SnarkManager implements CompleteListener, ClientApp {
      * @return success
      * @since 0.8.4
      */
-    public boolean addTorrent(MetaInfo metainfo, BitField bitfield, String filename,
+    public void addTorrent(MetaInfo metainfo, BitField bitfield, String filename,
                               File baseFile, boolean dontAutoStart) throws IOException {
 	addTorrent(metainfo, bitfield, filename, baseFile, dontAutoStart, this, getDataDir().getPath());
     }
     
-    public void addTorrent(MetaInfo metainfo, BitField bitfield, String filename, File baseFile, boolean dontAutoStart, CompleteListener listener, String dataDir) throws IOException {
+    public boolean addTorrent(MetaInfo metainfo, BitField bitfield, String filename, File baseFile, boolean dontAutoStart, CompleteListener listener, String dataDir) throws IOException {
         // prevent interference by DirMonitor
         synchronized (_snarks) {
             Snark snark = getTorrentByInfoHash(metainfo.getInfoHash());
