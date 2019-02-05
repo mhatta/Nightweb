@@ -53,12 +53,15 @@
         storage (if (io/file-exists? torrent-path)
                   (Storage.
                     (.util ^SnarkManager @manager)
+                    (java.io/file path)	
                     (MetaInfo. (java.io/input-stream torrent-path))
-                    listener)
+                    listener
+		    false)
                   (Storage. (.util ^SnarkManager @manager)
                             (java.io/file path)
                             nil
                             nil
+			    nil
                             false
                             listener))]
     (.close storage)
@@ -172,6 +175,7 @@
                    nil ;dataDir
                    true ;filesPublic
                    true ;autoStart
+                   false ; smartSort
                    nil ;refreshDelay
                    nil ;startDelay
                    nil ;pageSize
@@ -180,10 +184,15 @@
                    nil ;eepPort
                    nil ;i2cpHost
                    nil ;i2cpPort
-                   nil ;i2cpOps
+                   nil ;i2cpOpts
                    nil ;upLimit
                    nil ;upBW
                    false ;useOpenTrackers
                    true ;useDHT
-                   nil) ;theme
+                   nil ;theme
+		   nil ; lang
+		   false ; enableRatings
+		   false ; enableComments
+		   nil ; commentName
+		   false) ; collapsePanels
     (.start ^SnarkManager @manager false)))

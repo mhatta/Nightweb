@@ -14,6 +14,8 @@
 		 [markdown-clj "0.9.38"]
                  [neko/neko "3.1.1"]
                  [org.clojure/java.jdbc "0.4.2"]
+                 [org.gnu.gettext/libintl "0.18.3"]
+                 [com.googlecode.json-simple/json-simple "1.1"]
                  [org.clojure-android/clojure "1.7.0" :use-resources true]]
   :profiles {:dev {:dependencies [[android/tools.nrepl "0.2.0-bigstack"]]
                    :android {:aot :all-with-unused}}
